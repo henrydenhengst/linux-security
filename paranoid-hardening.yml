@@ -1,0 +1,116 @@
+# -------------------------
+# APPARMOR (ENFORCED)
+# -------------------------
+- name: Install AppArmor
+  apt:
+    name:
+      - apparmor
+      - apparmor-utils
+    state: present
+
+- name: Enable AppArmor
+  service:
+    name: apparmor
+    state: started
+    enabled: yes
+
+- name: Enforce all AppArmor profiles
+  command: aa-enforce /etc/apparmor.d/*
+
+# -------------------------
+# EGRESS FIREWALL (STRICT)
+# -------------------------
+- name: Install UFW (if not present)
+  apt:
+    name: ufw
+    state: present
+
+- name: Default deny outgoing
+  ufw:
+    direction: outgoing
+    policy: deny
+
+- name: Allow DNS
+  ufw:
+    rule: allow
+    direction: outgoing
+    port: 53
+
+- name: Allow HTTP/HTTPS out
+  ufw:
+    rule: allow
+    direction: outgoing
+    port: 80
+
+- name: Allow HTTPS out
+  ufw:
+    rule: allow
+    direction: outgoing
+    port: 443
+
+# -------------------------
+# IMMUTABLE FILES
+# -------------------------
+- name: Lock critical files (immutable)
+  command: chattr +i {{ item }}
+  loop:
+    - /etc/passwd
+    - /etc/shadow
+    - /etc/group
+    - /etc/ssh/sshd_config
+  ignore_errors: yes
+
+# -------------------------
+# DISABLE UNUSED SERVICES
+# -------------------------
+- name: Disable unnecessary services
+  systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: no
+  loop:
+    - cups
+    - avahi-daemon
+    - bluetooth
+  ignore_errors: yes
+
+# -------------------------
+# KERNEL HARDENING EXTRA
+# -------------------------
+- name: Extra sysctl lockdown
+  copy:
+    dest: /etc/sysctl.d/98-paranoid.conf
+    content: |
+      kernel.dmesg_restrict=1
+      kernel.unprivileged_bpf_disabled=1
+      net.ipv4.icmp_echo_ignore_broadcasts=1
+      net.ipv4.conf.all.log_martians=1
+  notify: Reload sysctl
+
+# -------------------------
+# PERSISTENCE DETECTION
+# -------------------------
+- name: Scan for suspicious systemd services
+  shell: |
+    systemctl list-unit-files | grep enabled
+  register: services_out
+
+- debug:
+    var: services_out.stdout_lines
+
+# -------------------------
+# SIMPLE ALERTING (MAIL)
+# -------------------------
+- name: Install mail utils
+  apt:
+    name: mailutils
+    state: present
+
+- name: Alert script
+  copy:
+    dest: /usr/local/bin/security-alert.sh
+    mode: '0755'
+    content: |
+      #!/bin/bash
+      LOG="/var/log/security/report.log"
+      tail -n 50 $LOG | mail -s "Security Alert" root
