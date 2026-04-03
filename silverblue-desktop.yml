@@ -1,0 +1,35 @@
+---
+# DOEL: High-end GNOME desktop op een immutable basis.
+# STRATEGIE: Base-layer blijft onaangeraakt; alle apps via Flathub.
+# IDEMPOTENTIE: De flatpak_remote module garandeert de juiste bron.
+- name: "Fedora Silverblue: Ultimate GNOME Workstation"
+  hosts: silverblue_nodes
+  become: false
+  vars:
+    desktop_apps:
+      - org.mozilla.firefox
+      - org.gnome.Geary
+      - org.gnome.Calendar
+      - org.gnome.Lollypop
+      - org.gnome.Weather
+      - org.gnome.Maps
+      - org.libreoffice.LibreOffice
+      - org.gimp.GIMP
+      - org.inkscape.Inkscape
+      - org.videolan.VLC
+
+  tasks:
+    - name: "VALIDATIE: Remote Flathub toevoegen"
+      community.general.flatpak_remote:
+        name: flathub
+        state: present
+        url: https://dl.flathub.org/repo/flathub.flatpakrepo
+
+    - name: "EXECUTION: Massale uitrol Desktop Suite"
+      community.general.flatpak:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ desktop_apps }}"
+      register: install_status
+      until: install_status is succeeded
+      retries: 3

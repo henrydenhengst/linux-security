@@ -1,0 +1,30 @@
+---
+# DOEL: Reproductibele desktop apps op NixOS.
+# VERS VAN NETBOOT: Zorgt dat de Flathub portal actief is.
+- name: "Nixos: Declarative App Deployment"
+  hosts: nixos_nodes
+  tasks:
+    - name: "CONFIG: Activeer Flatpak Support (via shell)"
+      ansible.builtin.shell: |
+        if ! command -v flatpak &> /dev/null; then
+          nix-env -iA nixos.flatpak
+        fi
+      changed_when: false
+
+    - name: "DEPLOYMENT: De 'Prachtige Desktop' Collectie"
+      community.general.flatpak:
+        name:
+          - org.freecadweb.FreeCAD
+          - org.blender.Blender
+          - org.darktable.Darktable
+          - net.cozic.joplin_desktop
+          - com.obsproject.Studio
+          - org.audacityteam.Audacity
+          - org.geogebra.GeoGebra
+        state: present
+        remote: flathub
+
+    - name: "AUDIT: Systeemstatus na uitrol"
+      ansible.builtin.command: nixos-version
+      register: nix_ver
+      changed_when: false

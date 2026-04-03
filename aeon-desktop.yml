@@ -1,0 +1,18 @@
+---
+# DOEL: Een 'hands-off' GNOME ervaring op openSUSE Aeon.
+# SECURITY: Flatseal wordt geïnstalleerd voor fijnmazig permissiebeheer.
+- name: "openSUSE Aeon: The Minimalist Professional"
+  hosts: aeon_nodes
+  tasks:
+    - name: "TOOLING: Installatie Essential Suite"
+      community.general.flatpak:
+        name:
+          - org.mozilla.firefox
+          - org.keepassxc.KeePassXC
+          - com.github.tchx84.Flatseal
+          - org.gnome.Characters
+          - org.gnome.font-viewer
+          - com.visualstudio.code
+          - org.signal.Signal
+          - org.telegram.desktop
+        state: present
