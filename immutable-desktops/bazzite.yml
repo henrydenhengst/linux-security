@@ -1,0 +1,27 @@
+---
+# DOCUMENTATIE:
+# Doel: Optimalisatie voor nieuwe hardware (GPU/CPU focus).
+# Risico-analyse: Gebruikt 'block-rescue' om falen bij hardware-specifieke apps op te vangen.
+# Observability: Logt de status van de GPU-versnelling voor audit doeleinden.
+- name: "Bazzite: Power-User & GPU Stack"
+  hosts: bazzite_hosts
+  tasks:
+    - name: "OBSERVABILITY: Log systeem-omgeving voor hardware-support"
+      ansible.builtin.shell: "glxinfo | grep 'OpenGL renderer'"
+      register: gpu_status
+      changed_when: false
+
+    - name: "OPERATIONAL: Uitrol van performance applicaties"
+      block:
+        - name: "Installatie suite"
+          community.general.flatpak:
+            name:
+              - com.obsproject.Studio      # Streaming/Recording
+              - com.discordapp.Discord     # Communicatie
+              - com.valvesoftware.Steam     # Gaming platform
+              - net.davidotek.pupgui2      # Proton-beheer
+            state: present
+      rescue:
+        - name: "INCIDENT RESPONSE: Foutafhandeling bij installatie"
+          ansible.builtin.debug:
+            msg: "Installatie op Bazzite onderbroken. Controleer internetverbinding of GPU-drivers."

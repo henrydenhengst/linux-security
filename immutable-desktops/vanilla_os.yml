@@ -1,0 +1,33 @@
+---
+# DOCUMENTATIE:
+# Doel: Transformeert een kale Vanilla OS installatie naar een creatief werkstation.
+# Architectuur: Maakt gebruik van de onveranderlijke root door apps in de user-space (Flatpak) te plaatsen.
+# Idempotentie: Controleert aanwezigheid van Flathub voordat installaties starten.
+- name: "Vanilla OS: Creative Master Suite Deployment"
+  hosts: vanilla_hosts
+  become: false
+  vars:
+    # Definition of Done: Alle onderstaande apps moeten functioneel zijn na uitvoering.
+    creative_suite:
+      - org.gimp.GIMP           # Fotobewerking
+      - org.inkscape.Inkscape   # Vector design
+      - org.blender.Blender     # 3D & Video
+      - org.kde.kdenlive        # Video montage
+      - org.audacityteam.Audacity # Audio processing
+
+  tasks:
+    - name: "PRE-CHECK: Valideer Flathub repository"
+      community.general.flatpak_remote:
+        name: flathub
+        state: present
+        url: https://dl.flathub.org/repo/flathub.flatpakrepo
+
+    - name: "EXECUTION: Installatie Creative Suite (Retry-logica voor netwerkstabiliteit)"
+      community.general.flatpak:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ creative_suite }}"
+      register: flatpak_result
+      until: flatpak_result is succeeded
+      retries: 3
+      delay: 10
