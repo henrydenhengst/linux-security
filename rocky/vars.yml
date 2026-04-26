@@ -1,0 +1,41 @@
+---
+# vars.yml
+# All configuration variables for the web stack
+
+# DuckDNS Configuration
+duckdns_subdomain: "myserver"  # Your DuckDNS subdomain (without .duckdns.org)
+duckdns_token: "CHANGE_ME_YOUR_TOKEN"  # Get from https://duckdns.org
+duckdns_update_ip: "ipv4"  # Options: ipv4, ipv6, both
+
+# Container Settings
+caddy_version: "latest"
+nginx_version: "alpine"
+duckdns_version: "latest"
+
+# Timezone (Find yours: timedatectl list-timezones)
+timezone: "Europe/Amsterdam"  # Change to your timezone
+
+# User Configuration
+podman_user: "poduser"
+container_user_uid: 1000
+container_user_gid: 1000
+
+# Domain Settings
+domain_name: "{{ duckdns_subdomain }}.duckdns.org"
+
+# Optional: Custom Nginx Configuration
+nginx_custom_config: false
+nginx_server_name: "_"  # Default, matches all server names
+
+# Firewall Rules
+open_ports:
+  - 80   # HTTP
+  - 443  # HTTPS
+
+# SELinux Settings
+selinux_enabled: true
+
+# Health Check Settings
+health_check_interval: 30s
+health_check_timeout: 10s
+health_check_retries: 3
