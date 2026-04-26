@@ -3,9 +3,9 @@
 # All configuration variables for the web stack
 
 # DuckDNS Configuration
-duckdns_subdomain: "denhengst"  # Your DuckDNS subdomain (without .duckdns.org)
-duckdns_token: "CHANGE_ME_YOUR_TOKEN"  # Get from https://duckdns.org
-duckdns_update_ip: "ipv4"  # Options: ipv4, ipv6, both
+duckdns_subdomain: "denhengst"
+duckdns_token: "YOUR_TOKEN_HERE"
+duckdns_update_ip: "ipv4"
 
 # Container Settings
 caddy_version: "latest"
@@ -25,7 +25,7 @@ container_user_gid: 1000
 domain_name: "{{ duckdns_subdomain }}.duckdns.org"
 
 # Email Configuration (DuckDuckGo Email Forwarding)
-duck_email: "vcp5693@duck.com"  # Your DuckDuckGo email address
+duck_email: "vcp5693@duck.com"
 
 # Nginx Configuration
 nginx_custom_config: false
