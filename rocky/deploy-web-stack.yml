@@ -21,11 +21,6 @@
         msg: "Please set duckdns_subdomain in vars.yml"
       when: duckdns_subdomain == "CHANGE_ME"
 
-    - name: Validate Gmail credentials are set (for ssmtp)
-      fail:
-        msg: "Please set gmail_user and gmail_app_password in vars.yml"
-      when: gmail_user == "CHANGE_ME" or gmail_app_password == "CHANGE_ME"
-
     - name: Ensure podman user exists
       user:
         name: "{{ podman_user }}"
@@ -131,8 +126,8 @@
         content: |
           <?php
           if ($_SERVER["REQUEST_METHOD"] == "POST") {
-              // Configuration
-              $to_email = "{{ contact_email }}";
+              // Configuration - using DuckDuckGo email forwarding
+              $to_email = "{{ duck_email }}";
               $subject = "Contact Form: " . $_POST['subject'];
               
               // Honeypot check
@@ -158,10 +153,10 @@
               $body .= "Email: $email\n\n";
               $body .= "Bericht:\n$message\n";
               
-              $headers = "From: {{ gmail_user }}\r\n";
+              $headers = "From: {{ duck_email }}\r\n";
               $headers .= "Reply-To: $email\r\n";
               
-              // Send email via ssmtp (mail() works now)
+              // Send email via standard mail() - DuckDuckGo handles forwarding
               if (mail($to_email, $subject, $body, $headers)) {
                   http_response_code(200);
                   echo "Bedankt! Je bericht is verzonden.";
@@ -328,9 +323,9 @@
         network: webnet
 
     # -------------------------------------------------------------------------
-    # 3. DEPLOY PHP-FPM CONTAINER WITH SSMTP
+    # 3. DEPLOY PHP-FPM CONTAINER (Simple - no ssmtp needed)
     # -------------------------------------------------------------------------
-    - name: Deploy PHP-FPM container with ssmtp
+    - name: Deploy PHP-FPM container
       become_user: "{{ podman_user }}"
       containers.podman.podman_container:
         name: php-fpm
@@ -343,16 +338,6 @@
         environment:
           PHP_UPLOAD_MAX_FILESIZE: 10M
           PHP_POST_MAX_SIZE: 10M
-        command: >
-          sh -c "apk add --no-cache ssmtp && 
-                 echo 'root={{ gmail_user }}' > /etc/ssmtp/ssmtp.conf &&
-                 echo 'mailhub=smtp.gmail.com:587' >> /etc/ssmtp/ssmtp.conf &&
-                 echo 'AuthUser={{ gmail_user }}' >> /etc/ssmtp/ssmtp.conf &&
-                 echo 'AuthPass={{ gmail_app_password }}' >> /etc/ssmtp/ssmtp.conf &&
-                 echo 'UseSTARTTLS=YES' >> /etc/ssmtp/ssmtp.conf &&
-                 echo 'TLS_CA_File=/etc/ssl/certs/ca-certificates.crt' >> /etc/ssmtp/ssmtp.conf &&
-                 echo 'FromLineOverride=YES' >> /etc/ssmtp/ssmtp.conf &&
-                 php-fpm"
         healthcheck:
           test: ["CMD", "php-fpm", "-t"]
           interval: "{{ health_check_interval }}"
@@ -498,7 +483,7 @@
       debug:
         msg: |
           ╔══════════════════════════════════════════════════════════════╗
-          ║           ✅ DEPLOYMENT COMPLETE! (PHP + SSMTP)              ║
+          ║      ✅ DEPLOYMENT COMPLETE! (DuckDuckGo Email)              ║
           ╚══════════════════════════════════════════════════════════════╝
           
           📍 WEBSITE ACCESS:
@@ -513,9 +498,9 @@
           
           📧 EMAIL CONFIGURATION:
           ────────────────────────────────────────────────────────────────
-          Using Gmail SMTP via ssmtp
-          From: {{ gmail_user }}
-          To: {{ contact_email }}
+          Using DuckDuckGo Email Forwarding
+          From: {{ duck_email }}
+          Forwarding to: Your connected Gmail inbox
           
           🐳 CONTAINER STATUS:
           ────────────────────────────────────────────────────────────────
@@ -523,9 +508,12 @@
           
           🛠️  MANAGEMENT COMMANDS:
           ────────────────────────────────────────────────────────────────
-          Test mail:       podman exec php-fpm php -r "mail('test@test.com', 'Test', 'Hi');"
-          View logs:       podman logs php-fpm
           Restart stack:   podman restart duckdns php-fpm nginx caddy
+          View logs:       podman logs php-fpm
+          
+          📁 HUGO DEPLOYMENT:
+          ────────────────────────────────────────────────────────────────
+          rsync -avz public/ poduser@server:/home/poduser/containers/nginx/html/
           
           ╔══════════════════════════════════════════════════════════════╗
           ║  Your Hugo site with working contact form is ready!         ║
