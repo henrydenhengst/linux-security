@@ -21,4 +21,17 @@ ansible-playbook deploy-web-stack.yml -vv
 echo "[web_servers]" > inventory_local.ini
 echo "localhost ansible_connection=local" >> inventory_local.ini
 ansible-playbook -i inventory_local.ini deploy-web-stack.yml
+
+# 8. Build your Hugo site locally
+hugo -d public/
+
+# 9. Copy to server (static content)
+rsync -avz public/ poduser@yourserver:/home/poduser/containers/nginx/html/
+
+# 10. PHP scripts (contact form) live in same directory
+# They work automatically alongside your static Hugo site
+
+
+
+
 ```
