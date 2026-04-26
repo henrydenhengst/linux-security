@@ -1,5 +1,5 @@
 ---
-- name: Deploy DuckDNS, Caddy, and Nginx with Rootless Podman
+- name: Deploy DuckDNS, Caddy, Nginx, and PHP-FPM with Rootless Podman
   hosts: web_servers
   become: yes
   gather_facts: yes
@@ -79,80 +79,26 @@
         group: "{{ podman_user }}"
         mode: '0644'
 
-    - name: Create Nginx test page
-      copy:
-        dest: "/home/{{ podman_user }}/containers/nginx/html/index.html"
-        content: |
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>Welcome to Nginx + Caddy + DuckDNS</title>
-              <style>
-                  * { margin: 0; padding: 0; box-sizing: border-box; }
-                  body {
-                      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                      min-height: 100vh;
-                      display: flex;
-                      justify-content: center;
-                      align-items: center;
-                  }
-                  .container {
-                      background: white;
-                      border-radius: 20px;
-                      padding: 40px;
-                      width: 90%;
-                      max-width: 600px;
-                      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                      text-align: center;
-                  }
-                  h1 { color: #333; margin-bottom: 20px; }
-                  .success { color: #4CAF50; font-size: 48px; margin-bottom: 20px; }
-                  .detail { background: #f5f5f5; padding: 15px; border-radius: 10px; margin: 20px 0; text-align: left; }
-                  .status { color: #666; margin: 10px 0; }
-                  .status strong { color: #4CAF50; }
-                  hr { margin: 20px 0; border: none; border-top: 1px solid #eee; }
-                  .footer { font-size: 12px; color: #999; }
-              </style>
-          </head>
-          <body>
-              <div class="container">
-                  <div class="success">✓</div>
-                  <h1>Your Stack is Working!</h1>
-                  <div class="detail">
-                      <div class="status"><strong>✓</strong> DuckDNS: Dynamic DNS active</div>
-                      <div class="status"><strong>✓</strong> Caddy: SSL termination active</div>
-                      <div class="status"><strong>✓</strong> Nginx: Serving content</div>
-                      <div class="status"><strong>✓</strong> Podman: Rootless containers</div>
-                  </div>
-                  <p>Domain: <strong>{{ domain_name }}</strong></p>
-                  <p>Server: <strong>{{ ansible_hostname }}</strong> ({{ ansible_default_ipv4.address }})</p>
-                  <hr>
-                  <div class="footer">
-                      Deployed with Ansible on {{ ansible_distribution }} {{ ansible_distribution_version }}
-                  </div>
-              </div>
-          </body>
-          </html>
-        owner: "{{ podman_user }}"
-        group: "{{ podman_user }}"
-        mode: '0644'
-
-    # Optional: Custom Nginx config if enabled
-    - name: Create custom Nginx configuration
+    - name: Create Nginx configuration with PHP support
       copy:
         dest: "/home/{{ podman_user }}/containers/nginx/conf.d/default.conf"
         content: |
           server {
               listen 80;
-              server_name {{ nginx_server_name }};
+              server_name _;
               root /usr/share/nginx/html;
-              index index.html;
+              index index.html index.php;
               
               location / {
                   try_files $uri $uri/ =404;
+              }
+              
+              # Pass PHP requests to PHP-FPM container
+              location ~ \.php$ {
+                  fastcgi_pass php-fpm:9000;
+                  fastcgi_index index.php;
+                  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                  include fastcgi_params;
               }
               
               # Security headers
@@ -162,7 +108,172 @@
         owner: "{{ podman_user }}"
         group: "{{ podman_user }}"
         mode: '0644'
-      when: nginx_custom_config | bool
+
+    - name: Create simple PHP info page (remove after testing)
+      copy:
+        dest: "/home/{{ podman_user }}/containers/nginx/html/info.php"
+        content: |
+          <?php
+          phpinfo();
+          ?>
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0644'
+
+    - name: Create sendmail.php script for contact form
+      copy:
+        dest: "/home/{{ podman_user }}/containers/nginx/html/sendmail.php"
+        content: |
+          <?php
+          if ($_SERVER["REQUEST_METHOD"] == "POST") {
+              // Configuration
+              $to_email = "{{ contact_email }}";  // Set in vars.yml
+              $subject = "Contact Form: " . $_POST['subject'];
+              
+              // Sanitize input
+              $name = htmlspecialchars($_POST['name']);
+              $email = filter_var($_POST['email'], FILTER_SANITIZE_EMAIL);
+              $message = htmlspecialchars($_POST['message']);
+              
+              // Build email
+              $body = "Name: $name\n";
+              $body .= "Email: $email\n\n";
+              $body .= "Message:\n$message\n";
+              
+              $headers = "From: $email\r\n";
+              $headers .= "Reply-To: $email\r\n";
+              
+              // Send email
+              if (mail($to_email, $subject, $body, $headers)) {
+                  echo json_encode(["status" => "success", "message" => "Email sent!"]);
+              } else {
+                  echo json_encode(["status" => "error", "message" => "Failed to send email"]);
+              }
+          } else {
+              echo json_encode(["status" => "error", "message" => "Invalid request method"]);
+          }
+          ?>
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0644'
+
+    - name: Create simple contact form HTML page
+      copy:
+        dest: "/home/{{ podman_user }}/containers/nginx/html/contact.html"
+        content: |
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Contact Us</title>
+              <style>
+                  * { margin: 0; padding: 0; box-sizing: border-box; }
+                  body {
+                      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                      min-height: 100vh;
+                      display: flex;
+                      justify-content: center;
+                      align-items: center;
+                      padding: 20px;
+                  }
+                  .container {
+                      background: white;
+                      border-radius: 20px;
+                      padding: 40px;
+                      width: 100%;
+                      max-width: 600px;
+                      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                  }
+                  h1 { color: #333; margin-bottom: 10px; }
+                  .subtitle { color: #666; margin-bottom: 30px; }
+                  .form-group { margin-bottom: 20px; }
+                  label { display: block; margin-bottom: 5px; color: #333; font-weight: 500; }
+                  input, textarea {
+                      width: 100%;
+                      padding: 12px;
+                      border: 1px solid #ddd;
+                      border-radius: 8px;
+                      font-size: 16px;
+                      transition: border-color 0.3s;
+                  }
+                  input:focus, textarea:focus {
+                      outline: none;
+                      border-color: #667eea;
+                  }
+                  button {
+                      background: #667eea;
+                      color: white;
+                      padding: 12px 30px;
+                      border: none;
+                      border-radius: 8px;
+                      font-size: 16px;
+                      cursor: pointer;
+                      transition: background 0.3s;
+                  }
+                  button:hover { background: #5a67d8; }
+                  .message {
+                      margin-top: 20px;
+                      padding: 10px;
+                      border-radius: 8px;
+                      display: none;
+                  }
+                  .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+                  .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <h1>Contact Me</h1>
+                  <p class="subtitle">Send me a message and I'll get back to you soon.</p>
+                  
+                  <form id="contactForm">
+                      <div class="form-group">
+                          <label>Name</label>
+                          <input type="text" name="name" required>
+                      </div>
+                      <div class="form-group">
+                          <label>Email</label>
+                          <input type="email" name="email" required>
+                      </div>
+                      <div class="form-group">
+                          <label>Subject</label>
+                          <input type="text" name="subject" required>
+                      </div>
+                      <div class="form-group">
+                          <label>Message</label>
+                          <textarea name="message" rows="5" required></textarea>
+                      </div>
+                      <button type="submit">Send Message</button>
+                  </form>
+                  <div id="response" class="message"></div>
+              </div>
+              
+              <script>
+                  document.getElementById('contactForm').addEventListener('submit', async (e) => {
+                      e.preventDefault();
+                      const formData = new FormData(e.target);
+                      const response = await fetch('sendmail.php', {
+                          method: 'POST',
+                          body: formData
+                      });
+                      const result = await response.json();
+                      const msgDiv = document.getElementById('response');
+                      msgDiv.className = `message ${result.status}`;
+                      msgDiv.textContent = result.message;
+                      msgDiv.style.display = 'block';
+                      if (result.status === 'success') {
+                          e.target.reset();
+                      }
+                      setTimeout(() => msgDiv.style.display = 'none', 5000);
+                  });
+              </script>
+          </body>
+          </html>
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0644'
 
     - name: Create pod network
       become_user: "{{ podman_user }}"
@@ -193,7 +304,29 @@
         network: webnet
 
     # -------------------------------------------------------------------------
-    # 3. DEPLOY NGINX CONTAINER (BACKEND)
+    # 3. DEPLOY PHP-FPM CONTAINER (NEW)
+    # -------------------------------------------------------------------------
+    - name: Deploy PHP-FPM container
+      become_user: "{{ podman_user }}"
+      containers.podman.podman_container:
+        name: php-fpm
+        image: "docker.io/php:{{ php_version }}-fpm-alpine"
+        state: started
+        restart_policy: unless-stopped
+        volumes:
+          - "/home/{{ podman_user }}/containers/nginx/html:/var/www/html:Z"
+        network: webnet
+        environment:
+          - PHP_UPLOAD_MAX_FILESIZE=10M
+          - PHP_POST_MAX_SIZE=10M
+        healthcheck:
+          test: ["CMD", "php-fpm", "-t"]
+          interval: "{{ health_check_interval }}"
+          timeout: "{{ health_check_timeout }}"
+          retries: "{{ health_check_retries }}"
+
+    # -------------------------------------------------------------------------
+    # 4. DEPLOY NGINX CONTAINER (BACKEND)
     # -------------------------------------------------------------------------
     - name: Deploy Nginx container
       become_user: "{{ podman_user }}"
@@ -213,7 +346,7 @@
           retries: "{{ health_check_retries }}"
 
     # -------------------------------------------------------------------------
-    # 4. DEPLOY CADDY CONTAINER (FRONTEND PROXY)
+    # 5. DEPLOY CADDY CONTAINER (FRONTEND PROXY)
     # -------------------------------------------------------------------------
     - name: Deploy Caddy container
       become_user: "{{ podman_user }}"
@@ -237,7 +370,7 @@
           retries: "{{ health_check_retries }}"
 
     # -------------------------------------------------------------------------
-    # 5. FIREWALL CONFIGURATION
+    # 6. FIREWALL CONFIGURATION
     # -------------------------------------------------------------------------
     - name: Ensure firewalld is running
       service:
@@ -263,7 +396,7 @@
       ignore_errors: yes
 
     # -------------------------------------------------------------------------
-    # 6. PRIVILEGED PORTS FIX (Required for rootless Podman)
+    # 7. PRIVILEGED PORTS FIX (Required for rootless Podman)
     # -------------------------------------------------------------------------
     - name: Allow rootless containers to bind to privileged ports
       sysctl:
@@ -280,7 +413,7 @@
         create: yes
 
     # -------------------------------------------------------------------------
-    # 7. SELINUX CONTEXT FIXES
+    # 8. SELINUX CONTEXT FIXES
     # -------------------------------------------------------------------------
     - name: Set SELinux context for container volumes
       command: "chcon -Rt container_file_t /home/{{ podman_user }}/containers/"
@@ -290,11 +423,11 @@
       changed_when: false
 
     # -------------------------------------------------------------------------
-    # 8. VERIFICATION AND STATUS
+    # 9. VERIFICATION AND STATUS
     # -------------------------------------------------------------------------
     - name: Wait for containers to be healthy
       pause:
-        seconds: 10
+        seconds: 15
 
     - name: Check all containers are running
       become_user: "{{ podman_user }}"
@@ -312,20 +445,26 @@
       register: duckdns_logs
       changed_when: false
 
-    - name: Get Caddy logs
+    - name: Test PHP processing
       become_user: "{{ podman_user }}"
-      command: podman logs --tail 10 caddy
-      register: caddy_logs
+      command: podman exec nginx curl -f http://localhost/info.php
+      register: php_test
       changed_when: false
+      failed_when: false
+
+    - name: Display PHP test result
+      debug:
+        msg: "✅ PHP is working correctly!"
+      when: php_test.rc == 0
 
     # -------------------------------------------------------------------------
-    # 9. OUTPUT ACCESS INFORMATION
+    # 10. OUTPUT ACCESS INFORMATION
     # -------------------------------------------------------------------------
     - name: Display deployment summary
       debug:
         msg: |
           ╔══════════════════════════════════════════════════════════════╗
-          ║                 ✅ DEPLOYMENT COMPLETE!                      ║
+          ║           ✅ DEPLOYMENT COMPLETE! (PHP ENABLED)              ║
           ╚══════════════════════════════════════════════════════════════╝
           
           📍 WEBSITE ACCESS:
@@ -333,43 +472,28 @@
           🔒 HTTPS:  https://{{ domain_name }}
           🔓 HTTP:   http://{{ domain_name }} (redirects to HTTPS)
           
+          📧 PHP CONTACT FORM:
+          ────────────────────────────────────────────────────────────────
+          Contact page:  https://{{ domain_name }}/contact.html
+          PHP info:      https://{{ domain_name }}/info.php (remove after testing)
+          
           🐳 CONTAINER STATUS:
           ────────────────────────────────────────────────────────────────
           {{ container_status.stdout }}
           
-          🔥 FIREWALL:
-          ────────────────────────────────────────────────────────────────
-          Open ports: {{ open_ports | join(', ') }}
-          
           🛠️  MANAGEMENT COMMANDS:
           ────────────────────────────────────────────────────────────────
-          View all logs:    podman logs -f --tail=50
-          Check DuckDNS:    podman logs duckdns | grep -i "OK"
-          Restart stack:    podman restart duckdns nginx caddy
-          Stop stack:       podman stop duckdns nginx caddy
-          Shell access:     podman exec -it caddy /bin/sh
+          View PHP logs:    podman logs php-fpm
+          Test PHP:         podman exec nginx curl http://localhost/info.php
+          Restart stack:    podman restart duckdns php-fpm nginx caddy
           
-          📁 CONFIGURATION FILES:
+          📁 HUGO + PHP WORKFLOW:
           ────────────────────────────────────────────────────────────────
-          Caddyfile:    /home/{{ podman_user }}/containers/caddy/Caddyfile
-          Nginx HTML:   /home/{{ podman_user }}/containers/nginx/html/
+          1. Build Hugo:    hugo -d public/
+          2. Copy to server: rsync -avz public/ poduser@server:/home/poduser/containers/nginx/html/
+          3. PHP scripts in same directory work automatically
           
           ╔══════════════════════════════════════════════════════════════╗
-          ║  Visit https://{{ domain_name }} to see your site!          ║
+          ║  Your Hugo site with PHP contact form is ready to go!       ║
           ╚══════════════════════════════════════════════════════════════╝
       when: container_status.rc == 0
-
-    - name: Warning if deployment has issues
-      debug:
-        msg: |
-          ⚠️ DEPLOYMENT ISSUES DETECTED
-          
-          Container Status: {{ container_status.stdout if container_status.rc != 0 else 'Failed to get status' }}
-          
-          Debug Commands:
-          1. podman ps -a
-          2. podman logs duckdns
-          3. podman logs nginx
-          4. podman logs caddy
-          5. journalctl -u podman -f
-      when: container_status.rc != 0
