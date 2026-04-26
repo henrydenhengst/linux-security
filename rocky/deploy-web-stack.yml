@@ -21,6 +21,11 @@
         msg: "Please set duckdns_subdomain in vars.yml"
       when: duckdns_subdomain == "CHANGE_ME"
 
+    - name: Validate Gmail credentials are set (for ssmtp)
+      fail:
+        msg: "Please set gmail_user and gmail_app_password in vars.yml"
+      when: gmail_user == "CHANGE_ME" or gmail_app_password == "CHANGE_ME"
+
     - name: Ensure podman user exists
       user:
         name: "{{ podman_user }}"
@@ -109,7 +114,7 @@
         group: "{{ podman_user }}"
         mode: '0644'
 
-    - name: Create simple PHP info page (remove after testing)
+    - name: Create PHP info page (remove after testing)
       copy:
         dest: "/home/{{ podman_user }}/containers/nginx/html/info.php"
         content: |
@@ -127,46 +132,62 @@
           <?php
           if ($_SERVER["REQUEST_METHOD"] == "POST") {
               // Configuration
-              $to_email = "{{ contact_email }}";  // Set in vars.yml
+              $to_email = "{{ contact_email }}";
               $subject = "Contact Form: " . $_POST['subject'];
+              
+              // Honeypot check
+              if (!empty($_POST["website"])) {
+                  http_response_code(403);
+                  exit("Spam detected.");
+              }
               
               // Sanitize input
               $name = htmlspecialchars($_POST['name']);
               $email = filter_var($_POST['email'], FILTER_SANITIZE_EMAIL);
               $message = htmlspecialchars($_POST['message']);
               
-              // Build email
-              $body = "Name: $name\n";
-              $body .= "Email: $email\n\n";
-              $body .= "Message:\n$message\n";
+              // Validate input
+              if (empty($name) || !filter_var($email, FILTER_VALIDATE_EMAIL) || empty($message)) {
+                  http_response_code(400);
+                  echo "Vul a.u.b. alle velden correct in.";
+                  exit;
+              }
               
-              $headers = "From: $email\r\n";
+              // Build email
+              $body = "Naam: $name\n";
+              $body .= "Email: $email\n\n";
+              $body .= "Bericht:\n$message\n";
+              
+              $headers = "From: {{ gmail_user }}\r\n";
               $headers .= "Reply-To: $email\r\n";
               
-              // Send email
+              // Send email via ssmtp (mail() works now)
               if (mail($to_email, $subject, $body, $headers)) {
-                  echo json_encode(["status" => "success", "message" => "Email sent!"]);
+                  http_response_code(200);
+                  echo "Bedankt! Je bericht is verzonden.";
               } else {
-                  echo json_encode(["status" => "error", "message" => "Failed to send email"]);
+                  http_response_code(500);
+                  echo "Oeps! Er ging iets mis bij het verzenden.";
               }
           } else {
-              echo json_encode(["status" => "error", "message" => "Invalid request method"]);
+              http_response_code(403);
+              echo "Ongeldige verzoekmethode.";
           }
           ?>
         owner: "{{ podman_user }}"
         group: "{{ podman_user }}"
         mode: '0644'
 
-    - name: Create simple contact form HTML page
+    - name: Create contact form HTML page
       copy:
         dest: "/home/{{ podman_user }}/containers/nginx/html/contact.html"
         content: |
           <!DOCTYPE html>
-          <html lang="en">
+          <html lang="nl">
           <head>
               <meta charset="UTF-8">
               <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>Contact Us</title>
+              <title>Contact</title>
               <style>
                   * { margin: 0; padding: 0; box-sizing: border-box; }
                   body {
@@ -196,12 +217,12 @@
                       border: 1px solid #ddd;
                       border-radius: 8px;
                       font-size: 16px;
-                      transition: border-color 0.3s;
                   }
                   input:focus, textarea:focus {
                       outline: none;
                       border-color: #667eea;
                   }
+                  .honeypot { display: none; }
                   button {
                       background: #667eea;
                       color: white;
@@ -210,7 +231,6 @@
                       border-radius: 8px;
                       font-size: 16px;
                       cursor: pointer;
-                      transition: background 0.3s;
                   }
                   button:hover { background: #5a67d8; }
                   .message {
@@ -225,12 +245,16 @@
           </head>
           <body>
               <div class="container">
-                  <h1>Contact Me</h1>
-                  <p class="subtitle">Send me a message and I'll get back to you soon.</p>
+                  <h1>Contact</h1>
+                  <p class="subtitle">Stuur mij een bericht.</p>
                   
-                  <form id="contactForm">
+                  <form id="contactForm" method="POST" action="sendmail.php">
+                      <div class="honeypot">
+                          <label>Website</label>
+                          <input type="text" name="website" tabindex="-1" autocomplete="off">
+                      </div>
                       <div class="form-group">
-                          <label>Name</label>
+                          <label>Naam</label>
                           <input type="text" name="name" required>
                       </div>
                       <div class="form-group">
@@ -238,14 +262,14 @@
                           <input type="email" name="email" required>
                       </div>
                       <div class="form-group">
-                          <label>Subject</label>
+                          <label>Onderwerp</label>
                           <input type="text" name="subject" required>
                       </div>
                       <div class="form-group">
-                          <label>Message</label>
+                          <label>Bericht</label>
                           <textarea name="message" rows="5" required></textarea>
                       </div>
-                      <button type="submit">Send Message</button>
+                      <button type="submit">Verstuur</button>
                   </form>
                   <div id="response" class="message"></div>
               </div>
@@ -258,12 +282,12 @@
                           method: 'POST',
                           body: formData
                       });
-                      const result = await response.json();
+                      const text = await response.text();
                       const msgDiv = document.getElementById('response');
-                      msgDiv.className = `message ${result.status}`;
-                      msgDiv.textContent = result.message;
+                      msgDiv.className = response.ok ? 'message success' : 'message error';
+                      msgDiv.textContent = text;
                       msgDiv.style.display = 'block';
-                      if (result.status === 'success') {
+                      if (response.ok) {
                           e.target.reset();
                       }
                       setTimeout(() => msgDiv.style.display = 'none', 5000);
@@ -304,21 +328,31 @@
         network: webnet
 
     # -------------------------------------------------------------------------
-    # 3. DEPLOY PHP-FPM CONTAINER (NEW)
+    # 3. DEPLOY PHP-FPM CONTAINER WITH SSMTP
     # -------------------------------------------------------------------------
-    - name: Deploy PHP-FPM container
+    - name: Deploy PHP-FPM container with ssmtp
       become_user: "{{ podman_user }}"
       containers.podman.podman_container:
         name: php-fpm
-        image: "docker.io/php:{{ php_version }}-fpm-alpine"
+        image: docker.io/php:8.3-fpm-alpine
         state: started
         restart_policy: unless-stopped
         volumes:
           - "/home/{{ podman_user }}/containers/nginx/html:/var/www/html:Z"
         network: webnet
         environment:
-          - PHP_UPLOAD_MAX_FILESIZE=10M
-          - PHP_POST_MAX_SIZE=10M
+          PHP_UPLOAD_MAX_FILESIZE: 10M
+          PHP_POST_MAX_SIZE: 10M
+        command: >
+          sh -c "apk add --no-cache ssmtp && 
+                 echo 'root={{ gmail_user }}' > /etc/ssmtp/ssmtp.conf &&
+                 echo 'mailhub=smtp.gmail.com:587' >> /etc/ssmtp/ssmtp.conf &&
+                 echo 'AuthUser={{ gmail_user }}' >> /etc/ssmtp/ssmtp.conf &&
+                 echo 'AuthPass={{ gmail_app_password }}' >> /etc/ssmtp/ssmtp.conf &&
+                 echo 'UseSTARTTLS=YES' >> /etc/ssmtp/ssmtp.conf &&
+                 echo 'TLS_CA_File=/etc/ssl/certs/ca-certificates.crt' >> /etc/ssmtp/ssmtp.conf &&
+                 echo 'FromLineOverride=YES' >> /etc/ssmtp/ssmtp.conf &&
+                 php-fpm"
         healthcheck:
           test: ["CMD", "php-fpm", "-t"]
           interval: "{{ health_check_interval }}"
@@ -326,7 +360,7 @@
           retries: "{{ health_check_retries }}"
 
     # -------------------------------------------------------------------------
-    # 4. DEPLOY NGINX CONTAINER (BACKEND)
+    # 4. DEPLOY NGINX CONTAINER
     # -------------------------------------------------------------------------
     - name: Deploy Nginx container
       become_user: "{{ podman_user }}"
@@ -346,7 +380,7 @@
           retries: "{{ health_check_retries }}"
 
     # -------------------------------------------------------------------------
-    # 5. DEPLOY CADDY CONTAINER (FRONTEND PROXY)
+    # 5. DEPLOY CADDY CONTAINER
     # -------------------------------------------------------------------------
     - name: Deploy Caddy container
       become_user: "{{ podman_user }}"
@@ -396,7 +430,7 @@
       ignore_errors: yes
 
     # -------------------------------------------------------------------------
-    # 7. PRIVILEGED PORTS FIX (Required for rootless Podman)
+    # 7. PRIVILEGED PORTS FIX
     # -------------------------------------------------------------------------
     - name: Allow rootless containers to bind to privileged ports
       sysctl:
@@ -464,7 +498,7 @@
       debug:
         msg: |
           ╔══════════════════════════════════════════════════════════════╗
-          ║           ✅ DEPLOYMENT COMPLETE! (PHP ENABLED)              ║
+          ║           ✅ DEPLOYMENT COMPLETE! (PHP + SSMTP)              ║
           ╚══════════════════════════════════════════════════════════════╝
           
           📍 WEBSITE ACCESS:
@@ -472,10 +506,16 @@
           🔒 HTTPS:  https://{{ domain_name }}
           🔓 HTTP:   http://{{ domain_name }} (redirects to HTTPS)
           
-          📧 PHP CONTACT FORM:
+          📧 CONTACT FORM:
           ────────────────────────────────────────────────────────────────
           Contact page:  https://{{ domain_name }}/contact.html
           PHP info:      https://{{ domain_name }}/info.php (remove after testing)
+          
+          📧 EMAIL CONFIGURATION:
+          ────────────────────────────────────────────────────────────────
+          Using Gmail SMTP via ssmtp
+          From: {{ gmail_user }}
+          To: {{ contact_email }}
           
           🐳 CONTAINER STATUS:
           ────────────────────────────────────────────────────────────────
@@ -483,17 +523,11 @@
           
           🛠️  MANAGEMENT COMMANDS:
           ────────────────────────────────────────────────────────────────
-          View PHP logs:    podman logs php-fpm
-          Test PHP:         podman exec nginx curl http://localhost/info.php
-          Restart stack:    podman restart duckdns php-fpm nginx caddy
-          
-          📁 HUGO + PHP WORKFLOW:
-          ────────────────────────────────────────────────────────────────
-          1. Build Hugo:    hugo -d public/
-          2. Copy to server: rsync -avz public/ poduser@server:/home/poduser/containers/nginx/html/
-          3. PHP scripts in same directory work automatically
+          Test mail:       podman exec php-fpm php -r "mail('test@test.com', 'Test', 'Hi');"
+          View logs:       podman logs php-fpm
+          Restart stack:   podman restart duckdns php-fpm nginx caddy
           
           ╔══════════════════════════════════════════════════════════════╗
-          ║  Your Hugo site with PHP contact form is ready to go!       ║
+          ║  Your Hugo site with working contact form is ready!         ║
           ╚══════════════════════════════════════════════════════════════╝
       when: container_status.rc == 0
