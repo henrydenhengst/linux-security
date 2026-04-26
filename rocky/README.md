@@ -24,7 +24,7 @@ Deploys:
 │   ├── html/          ← Put your Hugo site here
 │   └── conf.d/
 └── duckdns/
-└── config/
+    └── config/
 ```
 
 
