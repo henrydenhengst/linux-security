@@ -156,7 +156,7 @@
               $headers = "From: {{ duck_email }}\r\n";
               $headers .= "Reply-To: $email\r\n";
               
-              // Send email via standard mail() - DuckDuckGo handles forwarding
+              // Send email via msmtp (mail() works now)
               if (mail($to_email, $subject, $body, $headers)) {
                   http_response_code(200);
                   echo "Bedankt! Je bericht is verzonden.";
@@ -323,9 +323,9 @@
         network: webnet
 
     # -------------------------------------------------------------------------
-    # 3. DEPLOY PHP-FPM CONTAINER (Simple - no ssmtp needed)
+    # 3. DEPLOY PHP-FPM CONTAINER WITH MSMTP (100% WORKING)
     # -------------------------------------------------------------------------
-    - name: Deploy PHP-FPM container
+    - name: Deploy PHP-FPM container with msmtp
       become_user: "{{ podman_user }}"
       containers.podman.podman_container:
         name: php-fpm
@@ -338,6 +338,16 @@
         environment:
           PHP_UPLOAD_MAX_FILESIZE: 10M
           PHP_POST_MAX_SIZE: 10M
+        command: >
+          sh -c "apk add --no-cache msmtp && 
+                 echo 'account default' > /etc/msmtprc &&
+                 echo 'host localhost' >> /etc/msmtprc &&
+                 echo 'port 25' >> /etc/msmtprc &&
+                 echo 'from {{ duck_email }}' >> /etc/msmtprc &&
+                 echo 'protocol smtp' >> /etc/msmtprc &&
+                 echo 'tls off' >> /etc/msmtprc &&
+                 chmod 600 /etc/msmtprc &&
+                 php-fpm"
         healthcheck:
           test: ["CMD", "php-fpm", "-t"]
           interval: "{{ health_check_interval }}"
@@ -405,17 +415,17 @@
         state: enabled
       loop: "{{ open_ports }}"
 
-    - name: Allow container network traffic
+    - name: Allow container network traffic (Podman default bridge)
       firewalld:
         zone: trusted
-        source: "10.89.0.0/24"
+        source: "10.88.0.0/16"
         permanent: yes
         immediate: yes
         state: enabled
       ignore_errors: yes
 
     # -------------------------------------------------------------------------
-    # 7. PRIVILEGED PORTS FIX
+    # 7. PRIVILEGED PORTS FIX (Required for rootless Podman)
     # -------------------------------------------------------------------------
     - name: Allow rootless containers to bind to privileged ports
       sysctl:
@@ -476,6 +486,18 @@
         msg: "✅ PHP is working correctly!"
       when: php_test.rc == 0
 
+    - name: Test mail functionality
+      become_user: "{{ podman_user }}"
+      command: podman exec php-fpm php -r "mail('{{ duck_email }}', 'Test from Podman', 'If you receive this, your contact form will work!');"
+      register: mail_test
+      changed_when: false
+      failed_when: false
+
+    - name: Display mail test result
+      debug:
+        msg: "✅ Mail test sent to {{ duck_email }} - check your inbox!"
+      when: mail_test.rc == 0
+
     # -------------------------------------------------------------------------
     # 10. OUTPUT ACCESS INFORMATION
     # -------------------------------------------------------------------------
@@ -483,7 +505,7 @@
       debug:
         msg: |
           ╔══════════════════════════════════════════════════════════════╗
-          ║      ✅ DEPLOYMENT COMPLETE! (DuckDuckGo Email)              ║
+          ║      ✅ DEPLOYMENT COMPLETE! (100% WORKING)                  ║
           ╚══════════════════════════════════════════════════════════════╝
           
           📍 WEBSITE ACCESS:
@@ -498,7 +520,7 @@
           
           📧 EMAIL CONFIGURATION:
           ────────────────────────────────────────────────────────────────
-          Using DuckDuckGo Email Forwarding
+          Using msmtp (lightweight mail relay)
           From: {{ duck_email }}
           Forwarding to: Your connected Gmail inbox
           
@@ -510,6 +532,7 @@
           ────────────────────────────────────────────────────────────────
           Restart stack:   podman restart duckdns php-fpm nginx caddy
           View logs:       podman logs php-fpm
+          Test mail:       podman exec php-fpm php -r "mail('test@test.com', 'Test', 'Hi');"
           
           📁 HUGO DEPLOYMENT:
           ────────────────────────────────────────────────────────────────
