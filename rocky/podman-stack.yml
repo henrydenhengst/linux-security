@@ -27,6 +27,7 @@
           - cockpit-podman
           - firewalld
           - auditd
+          - fail2ban
         state: present
 
     # -------------------------------------------------------------------------
@@ -160,7 +161,66 @@
           ssh = "none"
 
     # -------------------------------------------------------------------------
-    # 4. COCKPIT CONFIGURATION & HARDENING
+    # 4. DISABLE PODMAN REST API SOCKET (SECURITY)
+    # -------------------------------------------------------------------------
+    - name: Disable Podman REST API socket
+      systemd:
+        name: "{{ item }}"
+        enabled: no
+        state: stopped
+        masked: yes
+      loop:
+        - io.podman.socket
+        - podman.socket
+      failed_when: false
+      register: socket_disable_result
+
+    - name: Display socket disable status
+      debug:
+        msg: "Podman sockets disabled (if they existed)"
+      when: not socket_disable_result.failed
+
+    # -------------------------------------------------------------------------
+    # 5. KERNEL MODULE RESTRICTIONS (SECURITY)
+    # -------------------------------------------------------------------------
+    - name: Restrict kernel modules for containers
+      copy:
+        dest: /etc/modprobe.d/container-blacklist.conf
+        content: |
+          # Block container access to sensitive kernel modules
+          blacklist sctp
+          blacklist dccp
+          blacklist rds
+          blacklist tipc
+          blacklist hsr
+          blacklist vsock
+          install cramfs /bin/false
+          install freevxfs /bin/false
+          install jffs2 /bin/false
+          install hfs /bin/false
+          install hfsplus /bin/false
+          install squashfs /bin/false
+          install udf /bin/false
+      notify: Update initramfs
+
+    # -------------------------------------------------------------------------
+    # 6. USER NAMESPACE REMAPPING FOR ROOTLESS CONTAINERS
+    # -------------------------------------------------------------------------
+    - name: Configure rootless user namespace remapping
+      copy:
+        dest: "/home/{{ podman_user }}/.config/containers/libpod.conf"
+        content: |
+          [containers]
+          # Explicitly enable user namespaces for better isolation
+          userns = "auto"
+          # Size of the user namespace
+          userns_size = 65536
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0644'
+
+    # -------------------------------------------------------------------------
+    # 7. COCKPIT CONFIGURATION & HARDENING
     # -------------------------------------------------------------------------
     - name: Enable Cockpit socket
       systemd:
@@ -182,7 +242,29 @@
           IdleTimeout=15
 
     # -------------------------------------------------------------------------
-    # 5. USER RESOURCE LIMITS
+    # 8. FAIL2BAN FOR COCKPIT PROTECTION
+    # -------------------------------------------------------------------------
+    - name: Configure fail2ban for Cockpit
+      copy:
+        dest: /etc/fail2ban/jail.d/cockpit.local
+        content: |
+          [cockpit]
+          enabled = true
+          port = 9090
+          filter = cockpit
+          logpath = /var/log/messages
+          maxretry = 3
+          bantime = 3600
+      notify: Restart fail2ban
+
+    - name: Ensure fail2ban is running
+      service:
+        name: fail2ban
+        enabled: yes
+        state: started
+
+    # -------------------------------------------------------------------------
+    # 9. USER RESOURCE LIMITS
     # -------------------------------------------------------------------------
     - name: Increase limits for podman user
       copy:
@@ -194,7 +276,7 @@
           {{ podman_user }} hard nproc 65535
 
     # -------------------------------------------------------------------------
-    # 6. SECURITY & NETWORKING
+    # 10. SECURITY & NETWORKING
     # -------------------------------------------------------------------------
     - name: Ensure SELinux is enforcing
       selinux:
@@ -224,6 +306,12 @@
           net.bridge.bridge-nf-call-iptables=1
           net.bridge.bridge-nf-call-ip6tables=1
       notify: Reload sysctl
+
+    - name: Ensure sysctl settings persist after reboot
+      systemd:
+        name: systemd-sysctl
+        enabled: yes
+        state: started
 
     - name: Set restrictive umask for podman user
       lineinfile:
@@ -261,7 +349,7 @@
         mode: '0644'
 
     # -------------------------------------------------------------------------
-    # 7. AUTO-CLEANUP (WEEKLY PRUNE)
+    # 11. AUTO-CLEANUP (WEEKLY PRUNE)
     # -------------------------------------------------------------------------
     - name: Schedule weekly container prune
       cron:
@@ -282,7 +370,7 @@
         job: "/usr/bin/podman system prune --volumes -f"
 
     # -------------------------------------------------------------------------
-    # 8. VERIFICATION
+    # 12. VERIFICATION
     # -------------------------------------------------------------------------
     - name: Test podman rootless info
       become_user: "{{ podman_user }}"
@@ -321,3 +409,11 @@
       service:
         name: auditd
         state: restarted
+
+    - name: Restart fail2ban
+      service:
+        name: fail2ban
+        state: restarted
+
+    - name: Update initramfs
+      command: dracut -f
