@@ -3,7 +3,7 @@
 # All configuration variables for the web stack
 
 # DuckDNS Configuration
-duckdns_subdomain: "myserver"  # Your DuckDNS subdomain (without .duckdns.org)
+duckdns_subdomain: "denhengst"  # Your DuckDNS subdomain (without .duckdns.org)
 duckdns_token: "CHANGE_ME_YOUR_TOKEN"  # Get from https://duckdns.org
 duckdns_update_ip: "ipv4"  # Options: ipv4, ipv6, both
 
@@ -24,10 +24,8 @@ container_user_gid: 1000
 # Domain Settings
 domain_name: "{{ duckdns_subdomain }}.duckdns.org"
 
-# Email Configuration
-gmail_user: "your-email@gmail.com"
-gmail_app_password: "xxxx xxxx xxxx xxxx"  # 16 chars with spaces from Gmail
-contact_email: "you@yourdomain.com"  # Where contact form emails are sent TO
+# Email Configuration (DuckDuckGo Email Forwarding)
+duck_email: "vcp5693@duck.com"  # Your DuckDuckGo email address
 
 # Nginx Configuration
 nginx_custom_config: false
