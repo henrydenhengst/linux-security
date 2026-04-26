@@ -14,7 +14,7 @@ Deploys:
 - Email via DuckDuckGo forwarding (no 2FA, no SMTP credentials)
 
 ## File Structure After Deployment
-
+```
 /home/poduser/containers/
 ├── caddy/
 │   ├── Caddyfile
@@ -25,7 +25,7 @@ Deploys:
 │   └── conf.d/
 └── duckdns/
     └── config/
-
+```
 ## Prerequisites
 
 On your local machine (control node):
