@@ -169,3 +169,42 @@
   handlers:
     - name: Reload sysctl
       command: sysctl --system
+
+  # ------------------------
+  # USER RESOURCE LIMITS
+  # ------------------------
+    - name: Increase limits for podman user
+      copy:
+        dest: "/etc/security/limits.d/{{ podman_user }}.conf"
+        content: |
+          {{ podman_user }} soft nofile 65535
+          {{ podman_user }} hard nofile 65535
+          {{ podman_user }} soft nproc 65535
+          {{ podman_user }} hard nproc 65535
+
+  # ------------------------
+  # CONFIGURE DEFAULT CONTAINER SETTINGS
+  # ------------------------
+    - name: Set global containers.conf
+      copy:
+        dest: /etc/containers/containers.conf
+        content: |
+          [containers]
+          log_driver = "journald"
+          log_size_max = 52428800
+
+          [network]
+          network_backend = "netavark"
+
+  # ------------------------
+  # AUTO-CLEANUP (WEEKLY PRUNE)
+  # ------------------------
+    - name: Schedule weekly container prune
+      cron:
+        name: "Podman system prune"
+        user: "{{ podman_user }}"
+        minute: "0"
+        hour: "2"
+        weekday: "0"
+        job: "/usr/bin/podman system prune -f"
+
