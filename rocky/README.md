@@ -113,10 +113,10 @@ ssh poduser@yourserver "podman exec php-fpm php -i | grep sendmail"
 ssh poduser@yourserver "podman restart php-fpm"
 ```
 ### Step 9: Check DuckDuckGo forwarding
-Go to https://duckduckgo.com/email
-Verify that vcp5693@duck.com is active
-Verify your Gmail address is connected
-Check if emails are in queue
+- Go to https://duckduckgo.com/email
+- Verify that vcp5693@duck.com is active
+- Verify your Gmail address is connected
+- Check if emails are in queue
 
 ### Step 10: Check Gmail spam folder
 Emails from DuckDuckGo may go to spam. Mark them as "Not spam".
