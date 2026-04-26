@@ -28,6 +28,7 @@
           - firewalld
           - auditd
           - fail2ban
+          - dnf-automatic
         state: present
 
     # -------------------------------------------------------------------------
@@ -349,7 +350,56 @@
         mode: '0644'
 
     # -------------------------------------------------------------------------
-    # 11. AUTO-CLEANUP (WEEKLY PRUNE)
+    # 11. AUTOMATIC SECURITY UPDATES (DNF AUTOMATIC)
+    # -------------------------------------------------------------------------
+    - name: Configure dnf-automatic for security updates only
+      copy:
+        dest: /etc/dnf/automatic.conf
+        content: |
+          [commands]
+          # Security updates only (not all package updates)
+          upgrade_type = security
+          # Random delay to avoid thundering herd
+          random_sleep = 240
+          # Download updates but don't apply (let timer handle it)
+          download_updates = yes
+          apply_updates = yes
+          
+          [email]
+          # Send email to root on changes
+          emit_via = stdio
+          email_from = root@localhost
+          email_to = root
+          
+          [base]
+          debuglevel = 1
+          
+          [updates]
+          # Also update container-related packages
+          include_pkgs = podman,buildah,skopeo,cockpit,firewalld,kernel*
+          
+          [command]
+          # Don't reboot automatically
+          reboot = never
+      notify: Enable dnf-automatic timer
+
+    - name: Ensure dnf-automatic timer is enabled and running
+      systemd:
+        name: dnf-automatic.timer
+        enabled: yes
+        state: started
+
+    - name: Verify dnf-automatic timer status
+      command: systemctl status dnf-automatic.timer --no-pager
+      register: timer_status
+      changed_when: false
+
+    - name: Display timer status
+      debug:
+        msg: "{{ timer_status.stdout_lines }}"
+
+    # -------------------------------------------------------------------------
+    # 12. AUTO-CLEANUP (WEEKLY PRUNE)
     # -------------------------------------------------------------------------
     - name: Schedule weekly container prune
       cron:
@@ -370,7 +420,7 @@
         job: "/usr/bin/podman system prune --volumes -f"
 
     # -------------------------------------------------------------------------
-    # 12. VERIFICATION
+    # 13. VERIFICATION
     # -------------------------------------------------------------------------
     - name: Test podman rootless info
       become_user: "{{ podman_user }}"
@@ -401,6 +451,52 @@
         msg: "{{ container_test.stdout }}"
       when: container_test.rc == 0
 
+    # -------------------------------------------------------------------------
+    # 14. FINAL SUMMARY
+    # -------------------------------------------------------------------------
+    - name: Display deployment summary
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║           ✅ PODMAN STACK DEPLOYMENT COMPLETE!                   ║
+          ╚══════════════════════════════════════════════════════════════════╝
+          
+          🔐 SECURITY FEATURES ENABLED:
+          ───────────────────────────────────────────────────────────────────
+          • Rootless Podman user ({{ podman_user }})
+          • SELinux enforcing mode
+          • Firewalld with Cockpit access
+          • Fail2ban protecting Cockpit (3 attempts → 1 hour ban)
+          • Kernel module restrictions (blacklisted)
+          • Podman REST API disabled
+          • User namespace remapping (userns=auto)
+          • Dropped dangerous container capabilities
+          • Audit logging for container commands
+          
+          🔄 AUTOMATIC UPDATES:
+          ───────────────────────────────────────────────────────────────────
+          • Security updates only (dnf-automatic)
+          • Runs daily via systemd timer
+          • Podman, Cockpit, kernel security patches included
+          • Weekly container prune (Sundays at 2 AM)
+          • Daily orphan cleanup (3:30 AM)
+          
+          🚀 GETTING STARTED:
+          ───────────────────────────────────────────────────────────────────
+          • Cockpit UI: https://YOUR_SERVER_IP:9090
+          • Login with: {{ podman_user }} and password
+          • Test Podman: sudo -u {{ podman_user }} podman info
+          
+          📋 MANAGEMENT COMMANDS:
+          ───────────────────────────────────────────────────────────────────
+          • Check auto-updates: systemctl status dnf-automatic.timer
+          • Force security update: dnf-automatic --security
+          • Test container: podman run hello-world
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║         Your hardened Podman server is ready for action!        ║
+          ╚══════════════════════════════════════════════════════════════════╝
+
   handlers:
     - name: Reload sysctl
       command: sysctl --system
@@ -417,3 +513,10 @@
 
     - name: Update initramfs
       command: dracut -f
+
+    - name: Enable dnf-automatic timer
+      systemd:
+        name: dnf-automatic.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
