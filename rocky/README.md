@@ -101,4 +101,9 @@ ssh poduser@yourserver "podman logs duckdns"
 
 # 13. Remove everything (if you need to redeploy)
 ssh poduser@yourserver "podman stop duckdns php-fpm nginx caddy && podman rm duckdns php-fpm nginx caddy && podman network rm webnet"
+
+# 14. Test of mail werkt
+podman exec php-fpm php -r "mail('vcp5693@duck.com', 'Test', 'Contact form works!');"
+
+# 15. Check je DuckDuckGo email inbox (doorgestuurd naar Gmail)
 ```
