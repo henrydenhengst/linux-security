@@ -39,3 +39,7 @@ selinux_enabled: true
 health_check_interval: 30s
 health_check_timeout: 10s
 health_check_retries: 3
+
+# Existing vars plus these:
+php_version: "8.3"
+contact_email: "your-email@example.com"  # ← Where contact form emails go
