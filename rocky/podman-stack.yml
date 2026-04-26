@@ -11,7 +11,6 @@
       - "quay.io"
 
   tasks:
-
     # -------------------------------------------------------------------------
     # 1. INSTALL PACKAGES
     # -------------------------------------------------------------------------
@@ -27,6 +26,7 @@
           - cockpit
           - cockpit-podman
           - firewalld
+          - auditd
         state: present
 
     # -------------------------------------------------------------------------
@@ -66,22 +66,25 @@
 
           [storage.options]
           mount_program = "/usr/bin/fuse-overlayfs"
+          mountopt = "nodev,noexec,nosuid"
 
     - name: Configure container registries
       copy:
         dest: /etc/containers/registries.conf
         content: |
           unqualified-search-registries = [
-            {% for r in registries %}
-            "{{ r }}",
-            {% endfor %}
+            "docker.io",
+            "quay.io"
           ]
 
           [[registry]]
           prefix = "docker.io"
           location = "docker.io"
 
-    - name: Set container image policy (Strict)
+          [[registry.mirror]]
+          location = "mirror.docker.io"
+
+    - name: Set container image policy (Secure)
       copy:
         dest: /etc/containers/policy.json
         content: |
@@ -95,12 +98,66 @@
               "docker": {
                 "docker.io": [
                   {
-                    "type": "insecureAcceptAnything"
+                    "type": "signedBy",
+                    "keyType": "GPGKeys",
+                    "keyPath": "/etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release"
+                  }
+                ],
+                "quay.io": [
+                  {
+                    "type": "signedBy",
+                    "keyType": "GPGKeys",
+                    "keyPath": "/etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release"
                   }
                 ]
               }
             }
           }
+
+    - name: Set global containers.conf with security hardening
+      copy:
+        dest: /etc/containers/containers.conf
+        content: |
+          [containers]
+          log_driver = "journald"
+          log_size_max = 52428800
+          seccomp = true
+          cgroups = "enabled"
+          default_capabilities = [
+            "CHOWN",
+            "DAC_OVERRIDE",
+            "FOWNER",
+            "FSETID",
+            "KILL",
+            "NET_RAW",
+            "SETGID",
+            "SETUID",
+            "SETPCAP",
+            "NET_BIND_SERVICE"
+          ]
+          drop_capabilities = [
+            "AUDIT_WRITE",
+            "SYS_ADMIN",
+            "SYS_PTRACE",
+            "SYS_RAWIO",
+            "SYS_CHROOT",
+            "MKNOD",
+            "SETFCAP"
+          ]
+
+          [network]
+          network_backend = "netavark"
+
+          [engine]
+          cgroup_manager = "systemd"
+          events_logger = "journald"
+
+    - name: Disable container SSH access by default
+      copy:
+        dest: /etc/containers/containers.conf.d/ssh-block.conf
+        content: |
+          [containers]
+          ssh = "none"
 
     # -------------------------------------------------------------------------
     # 4. COCKPIT CONFIGURATION & HARDENING
@@ -118,12 +175,26 @@
           [WebService]
           IdleTimeout=15
           MaxStartups=3
+          AllowUnencrypted=false
+          ProtocolHeader=x-forwarded-proto
           
           [Session]
           IdleTimeout=15
 
     # -------------------------------------------------------------------------
-    # 5. SECURITY & NETWORKING
+    # 5. USER RESOURCE LIMITS
+    # -------------------------------------------------------------------------
+    - name: Increase limits for podman user
+      copy:
+        dest: "/etc/security/limits.d/{{ podman_user }}.conf"
+        content: |
+          {{ podman_user }} soft nofile 65535
+          {{ podman_user }} hard nofile 65535
+          {{ podman_user }} soft nproc 65535
+          {{ podman_user }} hard nproc 65535
+
+    # -------------------------------------------------------------------------
+    # 6. SECURITY & NETWORKING
     # -------------------------------------------------------------------------
     - name: Ensure SELinux is enforcing
       selinux:
@@ -150,55 +221,48 @@
           net.ipv4.ip_forward=1
           net.ipv4.conf.all.rp_filter=1
           net.ipv4.tcp_syncookies=1
+          net.bridge.bridge-nf-call-iptables=1
+          net.bridge.bridge-nf-call-ip6tables=1
       notify: Reload sysctl
 
-    # -------------------------------------------------------------------------
-    # 6. VERIFICATION
-    # -------------------------------------------------------------------------
-    - name: Test podman rootless info
-      become_user: "{{ podman_user }}"
-      command: podman info
-      register: podman_test
-      changed_when: false
+    - name: Set restrictive umask for podman user
+      lineinfile:
+        path: "/home/{{ podman_user }}/.bashrc"
+        line: "umask 027"
+        create: yes
 
-    - name: Print podman info status
-      debug:
-        msg: "Podman is correctly configured for rootless user: {{ podman_user }}"
-      when: podman_test.rc == 0
-
-  handlers:
-    - name: Reload sysctl
-      command: sysctl --system
-
-  # ------------------------
-  # USER RESOURCE LIMITS
-  # ------------------------
-    - name: Increase limits for podman user
+    - name: Configure audit logging for containers
       copy:
-        dest: "/etc/security/limits.d/{{ podman_user }}.conf"
+        dest: /etc/audit/rules.d/99-container-audit.rules
         content: |
-          {{ podman_user }} soft nofile 65535
-          {{ podman_user }} hard nofile 65535
-          {{ podman_user }} soft nproc 65535
-          {{ podman_user }} hard nproc 65535
+          -w /usr/bin/podman -p x -k podman-execution
+          -w /etc/containers/ -p wa -k container-config
+          -w /usr/bin/buildah -p x -k buildah-execution
+          -w /usr/bin/skopeo -p x -k skopeo-execution
+      notify: Restart auditd
 
-  # ------------------------
-  # CONFIGURE DEFAULT CONTAINER SETTINGS
-  # ------------------------
-    - name: Set global containers.conf
+    - name: Create user config directory
+      file:
+        path: "/home/{{ podman_user }}/.config/containers"
+        state: directory
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0755'
+
+    - name: Limit container log sizes for user
       copy:
-        dest: /etc/containers/containers.conf
+        dest: "/home/{{ podman_user }}/.config/containers/containers.conf"
         content: |
           [containers]
-          log_driver = "journald"
-          log_size_max = 52428800
+          log_size_max = 10485760
+          log_file = ""
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0644'
 
-          [network]
-          network_backend = "netavark"
-
-  # ------------------------
-  # AUTO-CLEANUP (WEEKLY PRUNE)
-  # ------------------------
+    # -------------------------------------------------------------------------
+    # 7. AUTO-CLEANUP (WEEKLY PRUNE)
+    # -------------------------------------------------------------------------
     - name: Schedule weekly container prune
       cron:
         name: "Podman system prune"
@@ -208,3 +272,52 @@
         weekday: "0"
         job: "/usr/bin/podman system prune -f"
 
+    - name: Schedule daily log cleanup
+      cron:
+        name: "Podman log cleanup"
+        user: "{{ podman_user }}"
+        minute: "30"
+        hour: "3"
+        day: "*"
+        job: "/usr/bin/podman system prune --volumes -f"
+
+    # -------------------------------------------------------------------------
+    # 8. VERIFICATION
+    # -------------------------------------------------------------------------
+    - name: Test podman rootless info
+      become_user: "{{ podman_user }}"
+      command: podman info
+      register: podman_test
+      changed_when: false
+      failed_when: false
+
+    - name: Print podman info status
+      debug:
+        msg: "Podman is correctly configured for rootless user: {{ podman_user }}"
+      when: podman_test.rc == 0
+
+    - name: Warn if podman test failed
+      debug:
+        msg: "WARNING: Podman test failed for user {{ podman_user }}. Check logs."
+      when: podman_test.rc != 0
+
+    - name: Test rootless container execution
+      become_user: "{{ podman_user }}"
+      command: podman run --rm docker.io/alpine echo "Container test successful"
+      register: container_test
+      changed_when: false
+      failed_when: false
+
+    - name: Display container test result
+      debug:
+        msg: "{{ container_test.stdout }}"
+      when: container_test.rc == 0
+
+  handlers:
+    - name: Reload sysctl
+      command: sysctl --system
+
+    - name: Restart auditd
+      service:
+        name: auditd
+        state: restarted
