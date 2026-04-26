@@ -1,0 +1,153 @@
+---
+- name: Install and Harden Podman Stack on Rocky Linux
+  hosts: all
+  become: yes
+
+  vars:
+    podman_user: poduser
+    subuid_range: "100000:65536"
+    registries:
+      - "docker.io"
+      - "quay.io"
+
+  tasks:
+
+  # ------------------------
+  # INSTALL PACKAGES
+  # ------------------------
+    - name: Install Podman, Buildah, Skopeo
+      dnf:
+        name:
+          - podman
+          - buildah
+          - skopeo
+          - podman-docker   # optional docker CLI compatibility
+          - fuse-overlayfs
+          - slirp4netns
+        state: present
+
+  # ------------------------
+  # CREATE ROOTLESS USER
+  # ------------------------
+    - name: Create container user
+      user:
+        name: "{{ podman_user }}"
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Configure subuid
+      lineinfile:
+        path: /etc/subuid
+        line: "{{ podman_user }}:{{ subuid_range }}"
+        create: yes
+
+    - name: Configure subgid
+      lineinfile:
+        path: /etc/subgid
+        line: "{{ podman_user }}:{{ subuid_range }}"
+        create: yes
+
+  # ------------------------
+  # ENABLE LINGER (RUN WITHOUT LOGIN)
+  # ------------------------
+    - name: Enable lingering for user
+      command: loginctl enable-linger {{ podman_user }}
+
+  # ------------------------
+  # CONTAINER STORAGE CONFIG
+  # ------------------------
+    - name: Configure containers storage
+      copy:
+        dest: /etc/containers/storage.conf
+        content: |
+          [storage]
+          driver = "overlay"
+          runroot = "/run/containers/storage"
+          graphroot = "/var/lib/containers/storage"
+
+          [storage.options]
+          mount_program = "/usr/bin/fuse-overlayfs"
+
+  # ------------------------
+  # REGISTRY CONFIG (SECURE)
+  # ------------------------
+    - name: Configure container registries
+      copy:
+        dest: /etc/containers/registries.conf
+        content: |
+          unqualified-search-registries = [
+            {% for r in registries %}
+            "{{ r }}",
+            {% endfor %}
+          ]
+
+          [[registry]]
+          prefix = "docker.io"
+          location = "docker.io"
+
+  # ------------------------
+  # POLICY (BLOCK UNSIGNED IMAGES OPTIONAL)
+  # ------------------------
+    - name: Set container image policy
+      copy:
+        dest: /etc/containers/policy.json
+        content: |
+          {
+            "default": [
+              {
+                "type": "reject"
+              }
+            ],
+            "transports": {
+              "docker": {
+                "docker.io": [
+                  {
+                    "type": "insecureAcceptAnything"
+                  }
+                ]
+              }
+            }
+          }
+
+  # ------------------------
+  # ENABLE SELINUX (IMPORTANT)
+  # ------------------------
+    - name: Ensure SELinux is enforcing
+      selinux:
+        policy: targeted
+        state: enforcing
+
+  # ------------------------
+  # FIREWALL FOR CONTAINERS
+  # ------------------------
+    - name: Ensure firewalld installed
+      dnf:
+        name: firewalld
+        state: present
+
+    - name: Enable firewalld
+      service:
+        name: firewalld
+        enabled: yes
+        state: started
+
+  # ------------------------
+  # SYSCTL FOR NETWORK HARDENING
+  # ------------------------
+    - name: Apply sysctl tuning
+      copy:
+        dest: /etc/sysctl.d/99-containers.conf
+        content: |
+          net.ipv4.ip_forward=1
+          net.ipv4.conf.all.rp_filter=1
+          net.ipv4.tcp_syncookies=1
+
+    - name: Reload sysctl
+      command: sysctl --system
+
+  # ------------------------
+  # TEST ROOTLESS PODMAN
+  # ------------------------
+    - name: Test podman rootless
+      become_user: "{{ podman_user }}"
+      command: podman info
