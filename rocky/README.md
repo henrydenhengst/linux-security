@@ -1,109 +1,161 @@
 # Podman + Hugo + PHP Contact Form Stack
 
-Deploys:
-- **DuckDNS** - Dynamic DNS updater
-- **Caddy** - Auto-SSL reverse proxy
-- **Nginx** - Static file server for Hugo
-- **PHP-FPM** - Contact form processing
+## Deploys: DuckDNS, Caddy, Nginx, PHP-FPM met msmtp
 
-## Security Notes
-- All containers run rootless (poduser)
-- SELinux enforcing
-- Automatic security updates enabled
-- Firewall only opens ports 80/443
+### Security Notes
 
-## File Structure After Deployment
+· Alle containers draaien rootless (poduser)
+· SELinux enforcing
+· Automatische security updates
+· Firewall alleen poort 80 en 443 open
+· Email via DuckDuckGo forwarding (geen 2FA)
 
-```text
+### Bestandsstructuur na deploy
+```
 /home/poduser/containers/
 ├── caddy/
 │   ├── Caddyfile
 │   ├── data/
 │   └── config/
 ├── nginx/
-│   ├── html/          ← Put your Hugo site here
+│   ├── html/          ← Jouw Hugo site komt hier
 │   └── conf.d/
 └── duckdns/
-    └── config/
+└── config/
 ```
 
+### Benodigdheden
 
-```bash
+Op jouw lokale machine:
+```
+sudo dnf install ansible   # (Rocky/RHEL)
+```
 
-# 0. PREREQUISITES
-#   Rocky/RHEL: sudo dnf install ansible
+### Op de server:
 
-# 1. Edit vars.yml with your DuckDNS token and subdomain
+· Rocky Linux 8 of 9
+· SSH toegang met root
+· Poort 80 en 443 open in router
+
+### Configuratiebestanden
+
+vars.yml
+
+```
+duckdns_subdomain: "denhengst"
+duckdns_token: "JOUW_TOKEN_HIER"
+duckdns_update_ip: "ipv4"
+caddy_version: "latest"
+nginx_version: "alpine"
+duckdns_version: "latest"
+php_version: "8.3"
+timezone: "Europe/Amsterdam"
+podman_user: "poduser"
+container_user_uid: 1000
+container_user_gid: 1000
+duck_email: "vcp5693@duck.com"
+domain_name: "{{ duckdns_subdomain }}.duckdns.org"
+open_ports:
+
+· 80
+· 443
+  selinux_enabled: true
+  health_check_interval: 30s
+  health_check_timeout: 10s
+  health_check_retries: 3
+```
+
+inventory.ini
+```
+[web_servers]
+jouw-server ansible_host=192.168.1.100 ansible_user=root
+```
+
+Deployment commando's
+```
 vim vars.yml
-
-# 1.5 Verify your vars.yml has all required variables:
-#   duckdns_subdomain: "your-subdomain"
-#   duckdns_token: "your-token"
-#   contact_email: "your-email@example.com"  # For PHP contact form
-#   timezone: "America/New_York"
-#   podman_user: "poduser"
-
-# 2. Update inventory.ini with your server IP
 vim inventory.ini
-
-# 3. Test connection to your server
 ansible -i inventory.ini web_servers -m ping
-
-# 4. Run the playbook in check mode (dry run)
 ansible-playbook deploy-web-stack.yml --check
-
-# 4.5 AFTER deployment - test PHP is working:
-curl https://your-subdomain.duckdns.org/info.php
-# (Remove info.php after testing for security)
-
-# 5. Run the playbook for real
 ansible-playbook deploy-web-stack.yml
-
-# 5.1 Wait 30-60 seconds for Caddy to obtain SSL certificates
 sleep 60
-
-# 5.5 Check container status manually:
-ssh poduser@yourserver "podman ps"
-
-# 6. If you want to see detailed output
-ansible-playbook deploy-web-stack.yml -vv
-
-# 7. To run on localhost instead of remote server
-echo "[web_servers]" > inventory_local.ini
-echo "localhost ansible_connection=local" >> inventory_local.ini
-ansible-playbook -i inventory_local.ini deploy-web-stack.yml
-
-# 8. Build your Hugo site locally
-hugo -d public/
-
-# 8.5 For automatic Hugo deploys (optional - add git hook):
-# On your server, in /home/poduser/containers/nginx/html/
-git init --bare && cat > hooks/post-receive << 'EOF'
-#!/bin/bash
-git --work-tree=/home/poduser/containers/nginx/html --git-dir=.git checkout -f
-EOF
-chmod +x hooks/post-receive
-
-# 9. Copy to server (static content)
-rsync -avz public/ poduser@yourserver:/home/poduser/containers/nginx/html/
-
-# 10. PHP scripts (contact form) live in same directory
-# They work automatically alongside your static Hugo site
-
-# 11. View contact form submissions (emails go to your contact_email)
-# No special command - emails arrive in your inbox!
-
-# 12. Troubleshooting - Check container logs if something fails:
-ssh poduser@yourserver "podman logs php-fpm"
-ssh poduser@yourserver "podman logs nginx"
-ssh poduser@yourserver "podman logs caddy"
-ssh poduser@yourserver "podman logs duckdns"
-
-# 13. Remove everything (if you need to redeploy)
-ssh poduser@yourserver "podman stop duckdns php-fpm nginx caddy && podman rm duckdns php-fpm nginx caddy && podman network rm webnet"
-
-# 14. Test of mail werkt
-podman exec php-fpm php -r "mail('vcp5693@duck.com', 'Test', 'Contact form works!');"
-
-# 15. Check je DuckDuckGo email inbox (doorgestuurd naar Gmail)
+ssh poduser@jouwserver "podman ps"
+curl https://denhengst.duckdns.org/info.php
 ```
+
+Email testen
+
+```
+ssh poduser@jouwserver "podman exec php-fpm php -r \"mail('vcp5693@duck.com', 'Test', 'Werkt!');\""
+```
+
+Hugo site deployen
+```
+hugo -d public/
+rsync -avz public/ poduser@jouwserver:/home/poduser/containers/nginx/html/
+```
+
+Management commando's
+
+Container status:
+```
+ssh poduser@jouwserver "podman ps"
+```
+
+Logs bekijken:
+```
+ssh poduser@jouwserver "podman logs php-fpm"
+ssh poduser@jouwserver "podman logs nginx"
+ssh poduser@jouwserver "podman logs caddy"
+ssh poduser@jouwserver "podman logs duckdns"
+```
+
+Herstarten:
+```
+ssh poduser@jouwserver "podman restart duckdns php-fpm nginx caddy"
+```
+
+Alles verwijderen (voor schone redeploy):
+```
+ssh poduser@jouwserver "podman stop duckdns php-fpm nginx caddy && podman rm duckdns php-fpm nginx caddy && podman network rm webnet"
+```
+
+Toegang
+```
+Website: https://denhengst.duckdns.org
+Contactformulier: https://denhengst.duckdns.org/contact.html
+Cockpit UI: https://JOUW_IP:9090 (login: poduser)
+```
+
+Hoe email werkt
+
+Contactformulier ingevuld -> PHP mail() -> msmtp -> localhost:25 -> DuckDuckGo (vcp5693@duck.com) -> forwarded naar jouw Gmail
+
+Geen Gmail SMTP, geen 2FA, geen App Passwords nodig!
+
+Problemen oplossen
+
+Container start niet:
+```
+ssh poduser@jouwserver "podman logs container-naam"
+```
+
+Email komt niet aan:
+```
+ssh poduser@jouwserver "podman exec php-fpm php -r \"mail('vcp5693@duck.com', 'Test', 'Hi');\""
+```
+
+Check of DuckDuckGo forwarding werkt op duckduckgo.com/email
+
+Website niet bereikbaar:
+```
+ssh root@jouwserver "firewall-cmd --list-ports"
+ssh poduser@jouwserver "podman ps"
+```
+
+Belangrijk
+
+· Verwijder info.php na testen
+· SSL vernieuwt automatisch via Caddy
+· DuckDNS update elke 5 minuten
+· Backup je vars.yml (bevat token)
