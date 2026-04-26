@@ -40,6 +40,11 @@ health_check_interval: 30s
 health_check_timeout: 10s
 health_check_retries: 3
 
-# Existing vars plus these:
+# PHP
 php_version: "8.3"
 contact_email: "your-email@example.com"  # ← Where contact form emails go
+
+# PHP
+gmail_user: "your-email@gmail.com"
+gmail_app_password: "xxxx xxxx xxxx xxxx"  # 16 chars with spaces
+contact_email: "you@yourdomain.com"  # Where contact form emails go
