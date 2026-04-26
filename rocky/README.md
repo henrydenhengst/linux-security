@@ -1,9 +1,9 @@
 ```bash
 # 1. Edit vars.yml with your DuckDNS token and subdomain
-nano vars.yml
+vim vars.yml
 
 # 2. Update inventory.ini with your server IP
-nano inventory.ini
+vim inventory.ini
 
 # 3. Test connection to your server
 ansible -i inventory.ini web_servers -m ping
