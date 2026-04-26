@@ -163,10 +163,10 @@ ssh poduser@yourserver "podman stop duckdns php-fpm nginx caddy && podman rm duc
 ```
 ## Access Web Interfaces
 
-Website: https://denhengst.duckdns.org
-Contact form: https://denhengst.duckdns.org/contact.html
-Cockpit UI: https://JOUW_IP:9090 (login: poduser)
-PHP info: https://denhengst.duckdns.org/info.php (remove after testing)
+- Website: https://denhengst.duckdns.org
+- Contact form: https://denhengst.duckdns.org/contact.html
+- Cockpit UI: https://JOUW_IP:9090 (login: poduser)
+- PHP info: https://denhengst.duckdns.org/info.php (remove after testing)
 
 ## Troubleshooting
 
