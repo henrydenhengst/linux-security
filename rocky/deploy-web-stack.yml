@@ -1,28 +1,34 @@
 ---
-- name: Deploy DuckDNS, Caddy, and Nginx containers with rootless Podman
-  hosts: all
+- name: Deploy DuckDNS, Caddy, and Nginx with Rootless Podman
+  hosts: web_servers
   become: yes
   gather_facts: yes
 
-  vars:
-    podman_user: poduser
-    domain: "{{ ansible_hostname }}.duckdns.org"
-    duckdns_token: "CHANGE_ME_YOUR_DUCKDNS_TOKEN"
-    timezone: "Europe/Amsterdam"
-    # Container versions
-    caddy_version: latest
-    nginx_version: alpine
-    duckdns_version: latest
+  vars_files:
+    - vars.yml
 
   tasks:
     # -------------------------------------------------------------------------
     # 1. PREREQUISITES CHECK
     # -------------------------------------------------------------------------
+    - name: Validate DuckDNS token is set
+      fail:
+        msg: "Please set duckdns_token in vars.yml"
+      when: duckdns_token == "CHANGE_ME_YOUR_TOKEN"
+
+    - name: Validate DuckDNS subdomain is set
+      fail:
+        msg: "Please set duckdns_subdomain in vars.yml"
+      when: duckdns_subdomain == "CHANGE_ME"
+
     - name: Ensure podman user exists
       user:
         name: "{{ podman_user }}"
         state: present
         create_home: yes
+        uid: "{{ container_user_uid }}"
+        groups: wheel
+        append: yes
 
     - name: Ensure lingering is enabled for podman user
       command: loginctl enable-linger {{ podman_user }}
@@ -48,22 +54,27 @@
         dest: "/home/{{ podman_user }}/containers/caddy/Caddyfile"
         content: |
           # Reverse proxy to Nginx
-          {{ domain }} {
+          {{ domain_name }} {
               reverse_proxy nginx:80
             
-              # Optional: Headers for security
+              # Security headers
               header {
-                  Strict-Transport-Security "max-age=31536000; includeSubDomains"
+                  Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
                   X-Content-Type-Options "nosniff"
                   X-Frame-Options "DENY"
+                  X-XSS-Protection "1; mode=block"
+                  Referrer-Policy "strict-origin-when-cross-origin"
+              }
+              
+              # Enable compression
+              encode gzip zstd
+              
+              # Logging
+              log {
+                  output file /data/access.log
+                  format json
               }
           }
-          
-          # Optional: Serve static files directly from Caddy
-          # {{ domain }} {
-          #     root * /usr/share/caddy
-          #     file_server
-          # }
         owner: "{{ podman_user }}"
         group: "{{ podman_user }}"
         mode: '0644'
@@ -73,29 +84,85 @@
         dest: "/home/{{ podman_user }}/containers/nginx/html/index.html"
         content: |
           <!DOCTYPE html>
-          <html>
+          <html lang="en">
           <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
               <title>Welcome to Nginx + Caddy + DuckDNS</title>
               <style>
-                  body { font-family: sans-serif; text-align: center; margin-top: 50px; }
-                  h1 { color: #333; }
-                  .container { border: 1px solid #ccc; padding: 20px; width: 80%; margin: 0 auto; }
+                  * { margin: 0; padding: 0; box-sizing: border-box; }
+                  body {
+                      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                      min-height: 100vh;
+                      display: flex;
+                      justify-content: center;
+                      align-items: center;
+                  }
+                  .container {
+                      background: white;
+                      border-radius: 20px;
+                      padding: 40px;
+                      width: 90%;
+                      max-width: 600px;
+                      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                      text-align: center;
+                  }
+                  h1 { color: #333; margin-bottom: 20px; }
+                  .success { color: #4CAF50; font-size: 48px; margin-bottom: 20px; }
+                  .detail { background: #f5f5f5; padding: 15px; border-radius: 10px; margin: 20px 0; text-align: left; }
+                  .status { color: #666; margin: 10px 0; }
+                  .status strong { color: #4CAF50; }
+                  hr { margin: 20px 0; border: none; border-top: 1px solid #eee; }
+                  .footer { font-size: 12px; color: #999; }
               </style>
           </head>
           <body>
               <div class="container">
-                  <h1>✓ Your Docker/Podman stack is working!</h1>
-                  <p>Served by: <strong>Nginx</strong> (backend)</p>
-                  <p>SSL/Proxy by: <strong>Caddy</strong> (frontend)</p>
-                  <p>DDNS by: <strong>DuckDNS</strong></p>
+                  <div class="success">✓</div>
+                  <h1>Your Stack is Working!</h1>
+                  <div class="detail">
+                      <div class="status"><strong>✓</strong> DuckDNS: Dynamic DNS active</div>
+                      <div class="status"><strong>✓</strong> Caddy: SSL termination active</div>
+                      <div class="status"><strong>✓</strong> Nginx: Serving content</div>
+                      <div class="status"><strong>✓</strong> Podman: Rootless containers</div>
+                  </div>
+                  <p>Domain: <strong>{{ domain_name }}</strong></p>
+                  <p>Server: <strong>{{ ansible_hostname }}</strong> ({{ ansible_default_ipv4.address }})</p>
                   <hr>
-                  <small>Deployed via Ansible on {{ ansible_distribution }} {{ ansible_distribution_version }}</small>
+                  <div class="footer">
+                      Deployed with Ansible on {{ ansible_distribution }} {{ ansible_distribution_version }}
+                  </div>
               </div>
           </body>
           </html>
         owner: "{{ podman_user }}"
         group: "{{ podman_user }}"
         mode: '0644'
+
+    # Optional: Custom Nginx config if enabled
+    - name: Create custom Nginx configuration
+      copy:
+        dest: "/home/{{ podman_user }}/containers/nginx/conf.d/default.conf"
+        content: |
+          server {
+              listen 80;
+              server_name {{ nginx_server_name }};
+              root /usr/share/nginx/html;
+              index index.html;
+              
+              location / {
+                  try_files $uri $uri/ =404;
+              }
+              
+              # Security headers
+              add_header X-Frame-Options "DENY" always;
+              add_header X-Content-Type-Options "nosniff" always;
+          }
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0644'
+      when: nginx_custom_config | bool
 
     - name: Create pod network
       become_user: "{{ podman_user }}"
@@ -114,12 +181,13 @@
         state: started
         restart_policy: unless-stopped
         env:
-          SUBDOMAINS: "{{ ansible_hostname }}"
+          SUBDOMAINS: "{{ duckdns_subdomain }}"
           TOKEN: "{{ duckdns_token }}"
           TZ: "{{ timezone }}"
-          UPDATE_IP: "ipv4"
-          PUID: "1000"
-          PGID: "1000"
+          UPDATE_IP: "{{ duckdns_update_ip }}"
+          PUID: "{{ container_user_uid }}"
+          PGID: "{{ container_user_gid }}"
+          LOG_FILE: "false"
         volumes:
           - "/home/{{ podman_user }}/containers/duckdns/config:/config:Z"
         network: webnet
@@ -140,9 +208,9 @@
         network: webnet
         healthcheck:
           test: ["CMD", "curl", "-f", "http://localhost/"]
-          interval: 30s
-          timeout: 10s
-          retries: 3
+          interval: "{{ health_check_interval }}"
+          timeout: "{{ health_check_timeout }}"
+          retries: "{{ health_check_retries }}"
 
     # -------------------------------------------------------------------------
     # 4. DEPLOY CADDY CONTAINER (FRONTEND PROXY)
@@ -162,13 +230,11 @@
           - "/home/{{ podman_user }}/containers/caddy/data:/data:Z"
           - "/home/{{ podman_user }}/containers/caddy/config:/config:Z"
         network: webnet
-        depends_on:
-          - nginx
         healthcheck:
           test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
-          interval: 30s
-          timeout: 10s
-          retries: 3
+          interval: "{{ health_check_interval }}"
+          timeout: "{{ health_check_timeout }}"
+          retries: "{{ health_check_retries }}"
 
     # -------------------------------------------------------------------------
     # 5. FIREWALL CONFIGURATION
@@ -185,18 +251,16 @@
         permanent: yes
         immediate: yes
         state: enabled
-      loop:
-        - "80"
-        - "443"
+      loop: "{{ open_ports }}"
 
-    - name: Allow container network traffic (if using bridge)
+    - name: Allow container network traffic
       firewalld:
         zone: trusted
         source: "10.89.0.0/24"
         permanent: yes
         immediate: yes
         state: enabled
-      ignore_errors: yes  # Only if using default podman bridge network
+      ignore_errors: yes
 
     # -------------------------------------------------------------------------
     # 6. PRIVILEGED PORTS FIX (Required for rootless Podman)
@@ -216,11 +280,13 @@
         create: yes
 
     # -------------------------------------------------------------------------
-    # 7. SELINUX CONTEXT FIXES (For Rocky Linux)
+    # 7. SELINUX CONTEXT FIXES
     # -------------------------------------------------------------------------
     - name: Set SELinux context for container volumes
       command: "chcon -Rt container_file_t /home/{{ podman_user }}/containers/"
-      when: ansible_selinux.status == "enabled"
+      when: 
+        - selinux_enabled | bool
+        - ansible_selinux.status == "enabled"
       changed_when: false
 
     # -------------------------------------------------------------------------
@@ -240,71 +306,70 @@
       debug:
         msg: "{{ container_status.stdout_lines }}"
 
-    - name: Get Caddy container logs
+    - name: Get DuckDNS logs
       become_user: "{{ podman_user }}"
-      command: podman logs --tail 20 caddy
-      register: caddy_logs
-      changed_when: false
-
-    - name: Check if DuckDNS updated successfully
-      become_user: "{{ podman_user }}"
-      command: podman logs duckdns 2>&1 | tail -5
+      command: podman logs --tail 15 duckdns
       register: duckdns_logs
       changed_when: false
 
-    - name: Display DuckDNS status
-      debug:
-        msg: |
-          ====================================
-          DuckDNS Status:
-          {{ duckdns_logs.stdout }}
-          ====================================
+    - name: Get Caddy logs
+      become_user: "{{ podman_user }}"
+      command: podman logs --tail 10 caddy
+      register: caddy_logs
+      changed_when: false
 
     # -------------------------------------------------------------------------
     # 9. OUTPUT ACCESS INFORMATION
     # -------------------------------------------------------------------------
-    - name: Display access URLs
+    - name: Display deployment summary
       debug:
         msg: |
-          ===========================================
-          ✅ DEPLOYMENT COMPLETE!
-          ===========================================
+          ╔══════════════════════════════════════════════════════════════╗
+          ║                 ✅ DEPLOYMENT COMPLETE!                      ║
+          ╚══════════════════════════════════════════════════════════════╝
           
-          Access your site at:
-          🔒 https://{{ domain }}
-          🔓 http://{{ domain }} (redirects to HTTPS)
+          📍 WEBSITE ACCESS:
+          ────────────────────────────────────────────────────────────────
+          🔒 HTTPS:  https://{{ domain_name }}
+          🔓 HTTP:   http://{{ domain_name }} (redirects to HTTPS)
           
-          Container Status:
-          - DuckDNS: Dynamic DNS updater (check logs above)
-          - Nginx: Backend web server on port 80
-          - Caddy: Frontend proxy with auto-SSL
+          🐳 CONTAINER STATUS:
+          ────────────────────────────────────────────────────────────────
+          {{ container_status.stdout }}
           
-          Firewall:
-          - Port 80 (HTTP) open
-          - Port 443 (HTTPS) open
+          🔥 FIREWALL:
+          ────────────────────────────────────────────────────────────────
+          Open ports: {{ open_ports | join(', ') }}
           
-          Management Commands:
-          - View logs: podman logs -f caddy
-          - Restart all: podman restart duckdns nginx caddy
-          - Stop all: podman stop duckdns nginx caddy
+          🛠️  MANAGEMENT COMMANDS:
+          ────────────────────────────────────────────────────────────────
+          View all logs:    podman logs -f --tail=50
+          Check DuckDNS:    podman logs duckdns | grep -i "OK"
+          Restart stack:    podman restart duckdns nginx caddy
+          Stop stack:       podman stop duckdns nginx caddy
+          Shell access:     podman exec -it caddy /bin/sh
           
-          ===========================================
+          📁 CONFIGURATION FILES:
+          ────────────────────────────────────────────────────────────────
+          Caddyfile:    /home/{{ podman_user }}/containers/caddy/Caddyfile
+          Nginx HTML:   /home/{{ podman_user }}/containers/nginx/html/
+          
+          ╔══════════════════════════════════════════════════════════════╗
+          ║  Visit https://{{ domain_name }} to see your site!          ║
+          ╚══════════════════════════════════════════════════════════════╝
       when: container_status.rc == 0
 
-    - name: Warning if deployment failed
+    - name: Warning if deployment has issues
       debug:
         msg: |
-          ⚠️ WARNING: Container deployment issues detected.
+          ⚠️ DEPLOYMENT ISSUES DETECTED
           
-          Check manually with:
-          podman ps -a
-          podman logs duckdns
-          podman logs nginx
-          podman logs caddy
+          Container Status: {{ container_status.stdout if container_status.rc != 0 else 'Failed to get status' }}
+          
+          Debug Commands:
+          1. podman ps -a
+          2. podman logs duckdns
+          3. podman logs nginx
+          4. podman logs caddy
+          5. journalctl -u podman -f
       when: container_status.rc != 0
-
-  handlers:
-    - name: Reload firewalld
-      service:
-        name: firewalld
-        state: reloaded
