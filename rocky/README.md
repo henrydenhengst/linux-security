@@ -1,3 +1,33 @@
+# Podman + Hugo + PHP Contact Form Stack
+
+Deploys:
+- **DuckDNS** - Dynamic DNS updater
+- **Caddy** - Auto-SSL reverse proxy
+- **Nginx** - Static file server for Hugo
+- **PHP-FPM** - Contact form processing
+
+## Security Notes
+- All containers run rootless (poduser)
+- SELinux enforcing
+- Automatic security updates enabled
+- Firewall only opens ports 80/443
+
+## File Structure After Deployment
+
+```text
+/home/poduser/containers/
+├── caddy/
+│   ├── Caddyfile
+│   ├── data/
+│   └── config/
+├── nginx/
+│   ├── html/          ← Put your Hugo site here
+│   └── conf.d/
+└── duckdns/
+└── config/
+```
+
+
 ```bash
 # 1. Edit vars.yml with your DuckDNS token and subdomain
 vim vars.yml
