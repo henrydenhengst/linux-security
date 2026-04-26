@@ -59,6 +59,9 @@ curl https://your-subdomain.duckdns.org/info.php
 # 5. Run the playbook for real
 ansible-playbook deploy-web-stack.yml
 
+# 5.1 Wait 30-60 seconds for Caddy to obtain SSL certificates
+sleep 60
+
 # 5.5 Check container status manually:
 ssh poduser@yourserver "podman ps"
 
