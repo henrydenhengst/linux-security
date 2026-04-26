@@ -4,11 +4,11 @@
 
 ### Security Notes
 
-· Alle containers draaien rootless (poduser)
-· SELinux enforcing
-· Automatische security updates
-· Firewall alleen poort 80 en 443 open
-· Email via DuckDuckGo forwarding (geen 2FA)
+- Alle containers draaien rootless (poduser)
+- SELinux enforcing
+- Automatische security updates
+- Firewall alleen poort 80 en 443 open
+- Email via DuckDuckGo forwarding (geen 2FA)
 
 ### Bestandsstructuur na deploy
 ```
@@ -33,9 +33,9 @@ sudo dnf install ansible   # (Rocky/RHEL)
 
 ### Op de server:
 
-· Rocky Linux 8 of 9
-· SSH toegang met root
-· Poort 80 en 443 open in router
+- Rocky Linux 8 of 9
+- SSH toegang met root
+- Poort 80 en 443 open in router
 
 ### Configuratiebestanden
 
