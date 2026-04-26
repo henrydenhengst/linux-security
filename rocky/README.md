@@ -56,9 +56,8 @@ container_user_gid: 1000
 duck_email: "vcp5693@duck.com"
 domain_name: "{{ duckdns_subdomain }}.duckdns.org"
 open_ports:
-
-· 80
-· 443
+- 80
+- 443
   selinux_enabled: true
   health_check_interval: 30s
   health_check_timeout: 10s
@@ -155,7 +154,7 @@ ssh poduser@jouwserver "podman ps"
 
 Belangrijk
 
-· Verwijder info.php na testen
-· SSL vernieuwt automatisch via Caddy
-· DuckDNS update elke 5 minuten
-· Backup je vars.yml (bevat token)
+- Verwijder info.php na testen
+- SSL vernieuwt automatisch via Caddy
+- DuckDNS update elke 5 minuten
+- Backup je vars.yml (bevat token)
