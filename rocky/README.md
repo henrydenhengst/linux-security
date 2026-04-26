@@ -98,4 +98,7 @@ ssh poduser@yourserver "podman logs php-fpm"
 ssh poduser@yourserver "podman logs nginx"
 ssh poduser@yourserver "podman logs caddy"
 ssh poduser@yourserver "podman logs duckdns"
+
+# 13. Remove everything (if you need to redeploy)
+ssh poduser@yourserver "podman stop duckdns php-fpm nginx caddy && podman rm duckdns php-fpm nginx caddy && podman network rm webnet"
 ```
