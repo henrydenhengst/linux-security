@@ -1,49 +1,48 @@
 # Podman + Hugo + PHP Contact Form Stack
 
-## Deploys: DuckDNS, Caddy, Nginx, PHP-FPM met msmtp
+Deploys:
+- DuckDNS - Dynamic DNS updater
+- Caddy - Auto-SSL reverse proxy
+- Nginx - Static file server for Hugo
+- PHP-FPM - Contact form processing with msmtp mail relay
 
-### Security Notes
-
-- Alle containers draaien rootless (poduser)
+## Security Notes
+- All containers run rootless (poduser)
 - SELinux enforcing
-- Automatische security updates
-- Firewall alleen poort 80 en 443 open
-- Email via DuckDuckGo forwarding (geen 2FA)
+- Automatic security updates enabled
+- Firewall only opens ports 80/443
+- Email via DuckDuckGo forwarding (no 2FA, no SMTP credentials)
 
-### Bestandsstructuur na deploy
-```
+## File Structure After Deployment
+
 /home/poduser/containers/
 ├── caddy/
 │   ├── Caddyfile
 │   ├── data/
 │   └── config/
 ├── nginx/
-│   ├── html/          ← Jouw Hugo site komt hier
+│   ├── html/          ← Put your Hugo site here
 │   └── conf.d/
 └── duckdns/
-└── config/
-```
+    └── config/
 
-### Benodigdheden
+## Prerequisites
 
-Op jouw lokale machine:
-```
-sudo dnf install ansible   # (Rocky/RHEL)
-```
+On your local machine (control node):
+sudo dnf install ansible   (Rocky/RHEL)
 
-### Op de server:
+On your server:
+- Rocky Linux 8 or 9
+- SSH access with root or sudo privileges
+- Ports 80 and 443 open in your router
 
-- Rocky Linux 8 of 9
-- SSH toegang met root
-- Poort 80 en 443 open in router
+## Configuration Files
 
-### Configuratiebestanden
+### vars.yml
 
-vars.yml
-
-```
+---
 duckdns_subdomain: "denhengst"
-duckdns_token: "JOUW_TOKEN_HIER"
+duckdns_token: "YOUR_TOKEN_HERE"
 duckdns_update_ip: "ipv4"
 caddy_version: "latest"
 nginx_version: "alpine"
@@ -56,105 +55,134 @@ container_user_gid: 1000
 duck_email: "vcp5693@duck.com"
 domain_name: "{{ duckdns_subdomain }}.duckdns.org"
 open_ports:
-- 80
-- 443
-  selinux_enabled: true
-  health_check_interval: 30s
-  health_check_timeout: 10s
-  health_check_retries: 3
-```
+  - 80
+  - 443
+selinux_enabled: true
+health_check_interval: 30s
+health_check_timeout: 10s
+health_check_retries: 3
 
-inventory.ini
-```
+### inventory.ini
+
 [web_servers]
-jouw-server ansible_host=192.168.1.100 ansible_user=root
-```
+your-server ansible_host=192.168.1.100 ansible_user=root
 
-Deployment commando's
-```
+## Deployment Commands
+
 vim vars.yml
 vim inventory.ini
 ansible -i inventory.ini web_servers -m ping
 ansible-playbook deploy-web-stack.yml --check
 ansible-playbook deploy-web-stack.yml
 sleep 60
-ssh poduser@jouwserver "podman ps"
+ssh poduser@yourserver "podman ps"
 curl https://denhengst.duckdns.org/info.php
-```
 
-Email testen
+## Verify Email is Working
 
-```
-ssh poduser@jouwserver "podman exec php-fpm php -r \"mail('vcp5693@duck.com', 'Test', 'Werkt!');\""
-```
+### Step 1: Check if msmtp is installed
+ssh poduser@yourserver "podman exec php-fpm which msmtp"
 
-Hugo site deployen
-```
+### Step 2: Check msmtp configuration
+ssh poduser@yourserver "podman exec php-fpm cat /etc/msmtprc"
+
+### Step 3: Manual test with msmtp
+ssh poduser@yourserver "podman exec php-fpm sh -c 'echo -e \"Subject: Test\n\nHallo wereld\" | msmtp vcp5693@duck.com'"
+
+### Step 4: Test PHP mail() function
+ssh poduser@yourserver "podman exec php-fpm php -r \"mail('vcp5693@duck.com', 'Test from PHP', 'Your contact form works!', 'From: vcp5693@duck.com');\""
+
+### Step 5: Check if sendmail binary exists
+ssh poduser@yourserver "podman exec php-fpm ls -la /usr/sbin/sendmail"
+
+### Step 6: If sendmail is missing, install msmtp-mta
+ssh poduser@yourserver "podman exec php-fpm apk add --no-cache msmtp msmtp-mta"
+
+### Step 7: Check PHP sendmail path
+ssh poduser@yourserver "podman exec php-fpm php -i | grep sendmail"
+
+### Step 8: Restart container if needed
+ssh poduser@yourserver "podman restart php-fpm"
+
+### Step 9: Check DuckDuckGo forwarding
+Go to https://duckduckgo.com/email
+Verify that vcp5693@duck.com is active
+Verify your Gmail address is connected
+Check if emails are in queue
+
+### Step 10: Check Gmail spam folder
+Emails from DuckDuckGo may go to spam. Mark them as "Not spam".
+
+## Deploy Your Hugo Site
+
 hugo -d public/
-rsync -avz public/ poduser@jouwserver:/home/poduser/containers/nginx/html/
-```
+rsync -avz public/ poduser@yourserver:/home/poduser/containers/nginx/html/
 
-Management commando's
+## How Email Forwarding Works
 
-Container status:
-```
-ssh poduser@jouwserver "podman ps"
-```
+User submits contact form
+        ↓
+PHP mail() function in container
+        ↓
+msmtp relays to DuckDuckGo SMTP
+        ↓
+DuckDuckGo receives at vcp5693@duck.com
+        ↓
+DuckDuckGo forwards to your Gmail inbox
 
-Logs bekijken:
-```
-ssh poduser@jouwserver "podman logs php-fpm"
-ssh poduser@jouwserver "podman logs nginx"
-ssh poduser@jouwserver "podman logs caddy"
-ssh poduser@jouwserver "podman logs duckdns"
-```
+No Gmail SMTP, no 2FA, no App Passwords needed!
 
-Herstarten:
-```
-ssh poduser@jouwserver "podman restart duckdns php-fpm nginx caddy"
-```
+## Management Commands
 
-Alles verwijderen (voor schone redeploy):
-```
-ssh poduser@jouwserver "podman stop duckdns php-fpm nginx caddy && podman rm duckdns php-fpm nginx caddy && podman network rm webnet"
-```
+### Check container status:
+ssh poduser@yourserver "podman ps"
 
-Toegang
-```
+### View logs:
+ssh poduser@yourserver "podman logs php-fpm"
+ssh poduser@yourserver "podman logs nginx"
+ssh poduser@yourserver "podman logs caddy"
+ssh poduser@yourserver "podman logs duckdns"
+
+### Restart containers:
+ssh poduser@yourserver "podman restart duckdns php-fpm nginx caddy"
+
+### Complete removal (for clean redeploy):
+ssh poduser@yourserver "podman stop duckdns php-fpm nginx caddy && podman rm duckdns php-fpm nginx caddy && podman network rm webnet"
+
+## Access Web Interfaces
+
 Website: https://denhengst.duckdns.org
-Contactformulier: https://denhengst.duckdns.org/contact.html
+Contact form: https://denhengst.duckdns.org/contact.html
 Cockpit UI: https://JOUW_IP:9090 (login: poduser)
-```
+PHP info: https://denhengst.duckdns.org/info.php (remove after testing)
 
-Hoe email werkt
+## Troubleshooting
 
-Contactformulier ingevuld -> PHP mail() -> msmtp -> localhost:25 -> DuckDuckGo (vcp5693@duck.com) -> forwarded naar jouw Gmail
+### Email not arriving - complete checklist:
 
-Geen Gmail SMTP, geen 2FA, geen App Passwords nodig!
+1. Test msmtp manually
+2. Check DuckDuckGo forwarding settings
+3. Check Gmail spam folder
+4. Verify container can reach internet: podman exec php-fpm ping -c 4 8.8.8.8
+5. Check msmtp logs: podman exec php-fpm cat /var/log/msmtp.log
+6. Verify DNS resolution: podman exec php-fpm nslookup duck.com
+7. Test with different email address
 
-Problemen oplossen
+### Container won't start:
+ssh poduser@yourserver "podman logs php-fpm"
 
-Container start niet:
-```
-ssh poduser@jouwserver "podman logs container-naam"
-```
+### Website not accessible:
+ssh root@yourserver "firewall-cmd --list-ports"
+ssh poduser@yourserver "podman ps"
 
-Email komt niet aan:
-```
-ssh poduser@jouwserver "podman exec php-fpm php -r \"mail('vcp5693@duck.com', 'Test', 'Hi');\""
-```
+### SELinux issues:
+ssh root@yourserver "ausearch -m avc -ts recent"
 
-Check of DuckDuckGo forwarding werkt op duckduckgo.com/email
+## Important Notes
 
-Website niet bereikbaar:
-```
-ssh root@jouwserver "firewall-cmd --list-ports"
-ssh poduser@jouwserver "podman ps"
-```
-
-Belangrijk
-
-- Verwijder info.php na testen
-- SSL vernieuwt automatisch via Caddy
-- DuckDNS update elke 5 minuten
-- Backup je vars.yml (bevat token)
+- Remove info.php after testing - security risk
+- SSL certificates auto-renew via Caddy
+- DuckDNS updates your IP every 5 minutes
+- Backup your vars.yml - contains your DuckDNS token
+- First email may take 30-60 seconds to arrive
+- Check Gmail spam folder for first emails
