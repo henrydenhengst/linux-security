@@ -1,6 +1,6 @@
 ---
 - name: Install and Harden Podman Stack with Cockpit on Rocky Linux
-  hosts: all
+  hosts: localhost
   become: yes
 
   vars:
