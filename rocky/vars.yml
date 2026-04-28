@@ -43,3 +43,10 @@ selinux_enabled: true
 health_check_interval: 30s
 health_check_timeout: 10s
 health_check_retries: 3
+
+# Rocket.Chat configuratie
+rocketchat_version: "6.4.8"
+mongodb_version: "7.0"
+
+# Let op: MongoDB password, admin password en admin username worden automatisch gegenereerd
+# Maar je kunt ze ook handmatig instellen door de vars in het playbook te overschrijven
