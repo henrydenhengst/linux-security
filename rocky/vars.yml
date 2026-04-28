@@ -3,7 +3,7 @@
 # All configuration variables for Linux Cafe Haarlem web stack
 
 # ============================================
-# DUCKDNS CONFIGURATION
+# DUCKDNS CONFIGURATION (voor dynamisch IP)
 # ============================================
 duckdns_subdomain: "linuxcafehaarlem"
 duckdns_token: "YOUR_TOKEN_HERE"
@@ -12,7 +12,13 @@ duckdns_update_ip: "ipv4"
 # ============================================
 # DOMAIN & NETWORK
 # ============================================
-domain_name: "{{ duckdns_subdomain }}.duckdns.org"
+# Eigen domein (professioneel)
+custom_domain: "lch.eu"
+# DuckDNS als backup/redirect (behouden voor dynamisch IP)
+duckdns_domain: "{{ duckdns_subdomain }}.duckdns.org"
+
+# Hoofddomein voor de services
+domain_name: "{{ custom_domain }}"
 timezone: "Europe/Amsterdam"
 
 # ============================================
@@ -38,7 +44,7 @@ mongodb_version: "7.0"
 rocketchat_port: 3000
 rocketchat_mongodb_database: "rocketchat"
 rocketchat_mongodb_user: "rocketchat"
-rocketchat_mongodb_password: "JouwMongoDBSterkeWachtwoord123!"  # Kies zelf een sterk wachtwoord
+rocketchat_mongodb_password: "JouwMongoDBSterkeWachtwoord123!"
 
 # Admin credentials
 rocketchat_admin_username: "lch"
