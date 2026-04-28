@@ -1,6 +1,6 @@
 ---
 - name: Deploy Rocket.Chat with MongoDB ReplicaSet on Rootless Podman
-  hosts: web_servers
+  hosts: localhost
   become: yes
   gather_facts: yes
 
