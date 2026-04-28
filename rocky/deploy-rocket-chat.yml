@@ -1,0 +1,316 @@
+---
+- name: Deploy Rocket.Chat with MongoDB ReplicaSet on Rootless Podman
+  hosts: web_servers
+  become: yes
+  gather_facts: yes
+
+  vars_files:
+    - vars.yml
+
+  vars:
+    rocketchat_version: "6.4.8"
+    mongodb_version: "7.0"
+    rocketchat_port: 3000
+    rocketchat_mongodb_database: "rocketchat"
+    rocketchat_mongodb_user: "rocketchat"
+    rocketchat_mongodb_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+    rocketchat_admin_email: "admin@{{ domain_name }}"
+    rocketchat_admin_username: "admin"
+    rocketchat_admin_pass: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # 1. CREATE REQUIRED DIRECTORIES
+    # -------------------------------------------------------------------------
+    - name: Create Rocket.Chat data directories
+      file:
+        path: "/home/{{ podman_user }}/containers/{{ item }}"
+        state: directory
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0755'
+      loop:
+        - rocketchat/data
+        - rocketchat/uploads
+        - mongodb/data
+        - mongodb/backups
+
+    # -------------------------------------------------------------------------
+    # 2. GENERATE MONGODB REPLICA SET KEYFILE
+    # -------------------------------------------------------------------------
+    - name: Generate MongoDB keyfile for replica set authentication
+      copy:
+        dest: "/home/{{ podman_user }}/containers/mongodb/keyfile"
+        content: "{{ lookup('password', '/dev/null length=756 chars=ascii_letters,digits,./') }}"
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0400'
+
+    # -------------------------------------------------------------------------
+    # 3. CREATE MONGODB DEPLOYMENT (REPLICA SET REQUIRED FOR ROCKET.CHAT)
+    # -------------------------------------------------------------------------
+    - name: Deploy MongoDB container with ReplicaSet configuration
+      become_user: "{{ podman_user }}"
+      containers.podman.podman_container:
+        name: rocketchat-db
+        image: "docker.io/mongo:{{ mongodb_version }}"
+        state: started
+        restart_policy: unless-stopped
+        volumes:
+          - "/home/{{ podman_user }}/containers/mongodb/data:/data/db:Z"
+          - "/home/{{ podman_user }}/containers/mongodb/keyfile:/opt/keyfile:Z"
+        env:
+          MONGO_INITDB_ROOT_USERNAME: "root"
+          MONGO_INITDB_ROOT_PASSWORD: "{{ rocketchat_mongodb_password }}"
+        command: >
+          mongod --replSet rs0
+          --keyFile /opt/keyfile
+          --bind_ip_all
+          --auth
+        network: webnet
+        healthcheck:
+          test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+          interval: "{{ health_check_interval }}"
+          timeout: "{{ health_check_timeout }}"
+          retries: "{{ health_check_retries }}"
+
+    - name: Wait for MongoDB to be ready
+      pause:
+        seconds: 10
+
+    - name: Initialize MongoDB ReplicaSet
+      become_user: "{{ podman_user }}"
+      command: >
+        podman exec rocketchat-db mongosh --quiet
+        --eval "rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'rocketchat-db:27017' }] })"
+      register: replica_init
+      failed_when: false
+      changed_when: "'ok: 1' in replica_init.stdout"
+
+    - name: Create Rocket.Chat database user
+      become_user: "{{ podman_user }}"
+      command: >
+        podman exec rocketchat-db mongosh --quiet
+        --eval "db.getSiblingDB('{{ rocketchat_mongodb_database }}').createUser({
+          user: '{{ rocketchat_mongodb_user }}',
+          pwd: '{{ rocketchat_mongodb_password }}',
+          roles: [{ role: 'readWrite', db: '{{ rocketchat_mongodb_database }}' }]
+        })"
+      register: user_create
+      failed_when: false
+      changed_when: "'ok: 1' in user_create.stdout"
+
+    # -------------------------------------------------------------------------
+    # 4. DEPLOY ROCKET.CHAT CONTAINER
+    # -------------------------------------------------------------------------
+    - name: Deploy Rocket.Chat container
+      become_user: "{{ podman_user }}"
+      containers.podman.podman_container:
+        name: rocketchat-app
+        image: "docker.io/rocketchat/rocket.chat:{{ rocketchat_version }}"
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "{{ rocketchat_port }}:3000"
+        volumes:
+          - "/home/{{ podman_user }}/containers/rocketchat/uploads:/app/uploads:Z"
+        env:
+          MONGO_URL: "mongodb://{{ rocketchat_mongodb_user }}:{{ rocketchat_mongodb_password }}@rocketchat-db:27017/{{ rocketchat_mongodb_database }}?replicaSet=rs0"
+          MONGO_OPLOG_URL: "mongodb://{{ rocketchat_mongodb_user }}:{{ rocketchat_mongodb_password }}@rocketchat-db:27017/local?replicaSet=rs0"
+          ROOT_URL: "https://chat.{{ domain_name }}"
+          PORT: "3000"
+          DEPLOY_METHOD: "podman"
+          OVERWRITE_SETTING_Show_Setup_Wizard: "completed"
+          ADMIN_EMAIL: "{{ rocketchat_admin_email }}"
+          ADMIN_USERNAME: "{{ rocketchat_admin_username }}"
+          ADMIN_PASS: "{{ rocketchat_admin_pass }}"
+        network: webnet
+        healthcheck:
+          test: ["CMD", "curl", "-f", "http://localhost:3000/api/info"]
+          interval: "{{ health_check_interval }}"
+          timeout: "{{ health_check_timeout }}"
+          retries: "{{ health_check_retries }}"
+      notify: Wait for Rocket.Chat
+
+    # -------------------------------------------------------------------------
+    # 5. UPDATE CADDYFILE FOR ROCKET.CHAT
+    # -------------------------------------------------------------------------
+    - name: Add Rocket.Chat subdomain to existing Caddyfile
+      blockinfile:
+        path: "/home/{{ podman_user }}/containers/caddy/Caddyfile"
+        marker: "# {mark} ROCKET.CHAT SUBDOMAIN"
+        content: |
+          chat.{{ domain_name }} {
+              reverse_proxy rocketchat-app:3000
+              
+              # Security headers
+              header {
+                  Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+                  X-Content-Type-Options "nosniff"
+                  X-Frame-Options "SAMEORIGIN"
+                  X-XSS-Protection "1; mode=block"
+                  Referrer-Policy "strict-origin-when-cross-origin"
+              }
+              
+              # Enable compression
+              encode gzip zstd
+              
+              # Upload size limit for file sharing
+              request_body {
+                  max_size 100MB
+              }
+              
+              # Logging
+              log {
+                  output file /data/rocketchat-access.log
+                  format json
+              }
+          }
+      notify: Reload Caddy
+
+    # -------------------------------------------------------------------------
+    # 6. CREATE SYSTEMD SERVICE FOR MONITORING (OPTIONAL)
+    # -------------------------------------------------------------------------
+    - name: Create Rocket.Chat status check script
+      copy:
+        dest: "/home/{{ podman_user }}/bin/rocketchat-status.sh"
+        content: |
+          #!/bin/bash
+          # Rocket.Chat health check script for monitoring
+          
+          if podman ps --filter "name=rocketchat-app" --filter "status=running" | grep -q rocketchat-app; then
+              echo "✅ Rocket.Chat is running"
+              exit 0
+          else
+              echo "❌ Rocket.Chat is not running"
+              exit 1
+          fi
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0755'
+
+    # -------------------------------------------------------------------------
+    # 7. DAILY BACKUP SCRIPT FOR MONGODB
+    # -------------------------------------------------------------------------
+    - name: Create MongoDB backup script
+      copy:
+        dest: "/home/{{ podman_user }}/bin/backup-rocketchat.sh"
+        content: |
+          #!/bin/bash
+          BACKUP_DIR="/home/{{ podman_user }}/containers/mongodb/backups"
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          BACKUP_NAME="rocketchat_backup_${TIMESTAMP}"
+          
+          podman exec rocketchat-db mongodump \
+              --username {{ rocketchat_mongodb_user }} \
+              --password {{ rocketchat_mongodb_password }} \
+              --authenticationDatabase {{ rocketchat_mongodb_database }} \
+              --db {{ rocketchat_mongodb_database }} \
+              --out /tmp/${BACKUP_NAME}
+          
+          podman cp rocketchat-db:/tmp/${BACKUP_NAME} ${BACKUP_DIR}/
+          podman exec rocketchat-db rm -rf /tmp/${BACKUP_NAME}
+          
+          # Keep only last 7 backups
+          cd ${BACKUP_DIR} && ls -t | tail -n +8 | xargs rm -rf 2>/dev/null
+          
+          echo "Backup completed: ${BACKUP_DIR}/${BACKUP_NAME}"
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0755'
+
+    - name: Schedule daily Rocket.Chat backup
+      cron:
+        name: "Rocket.Chat database backup"
+        user: "{{ podman_user }}"
+        minute: "0"
+        hour: "3"
+        day: "*"
+        job: "/home/{{ podman_user }}/bin/backup-rocketchat.sh"
+
+    # -------------------------------------------------------------------------
+    # 8. VERIFICATION
+    # -------------------------------------------------------------------------
+    - name: Check Rocket.Chat container status
+      become_user: "{{ podman_user }}"
+      command: podman ps --filter "name=rocketchat-app" --format "table {{.Names}}\t{{.Status}}"
+      register: rocketchat_status
+      changed_when: false
+
+    - name: Wait for Rocket.Chat web interface
+      uri:
+        url: "http://127.0.0.1:{{ rocketchat_port }}/api/info"
+        status_code: 200
+        timeout: 30
+      register: rocketchat_api
+      retries: 12
+      delay: 10
+      until: rocketchat_api.status == 200
+
+    # -------------------------------------------------------------------------
+    # 9. OUTPUT DEPLOYMENT SUMMARY
+    # -------------------------------------------------------------------------
+    - name: Display Rocket.Chat deployment summary
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║           🚀 ROCKET.CHAT DEPLOYMENT COMPLETE!                    ║
+          ╚══════════════════════════════════════════════════════════════════╝
+          
+          📍 ROCKET.CHAT ACCESS:
+          ───────────────────────────────────────────────────────────────────
+          🔒 Web Interface:  https://chat.{{ domain_name }}
+          🔓 Local Access:   http://localhost:{{ rocketchat_port }}
+          
+          👑 ADMIN CREDENTIALS (SAVE THESE!):
+          ───────────────────────────────────────────────────────────────────
+          Username: {{ rocketchat_admin_username }}
+          Password: {{ rocketchat_admin_pass }}
+          Email:    {{ rocketchat_admin_email }}
+          
+          🐳 CONTAINER STATUS:
+          ───────────────────────────────────────────────────────────────────
+          {{ rocketchat_status.stdout }}
+          
+          📦 MONGODB INFORMATION:
+          ───────────────────────────────────────────────────────────────────
+          Database: {{ rocketchat_mongodb_database }}
+          User: {{ rocketchat_mongodb_user }}
+          Password: {{ rocketchat_mongodb_password }}
+          ReplicaSet: rs0
+          
+          🛠️  MANAGEMENT COMMANDS:
+          ───────────────────────────────────────────────────────────────────
+          View logs:    podman logs rocketchat-app
+          Restart:      podman restart rocketchat-app rocketchat-db
+          Backup:       /home/{{ podman_user }}/bin/backup-rocketchat.sh
+          Health check: /home/{{ podman_user }}/bin/rocketchat-status.sh
+          
+          🔧 POST-INSTALLATION STEPS:
+          ───────────────────────────────────────────────────────────────────
+          1. Visit https://chat.{{ domain_name }} to access Rocket.Chat
+          2. Log in with the admin credentials above
+          3. Configure your workspace settings (Workspace name, logo, etc.)
+          4. Set up user registration (Invite only / Open registration)
+          5. Configure file storage (Default uses local uploads folder)
+          
+          📁 REGISTRATION OPTIONS FOR LINUX CAFE HAARLEM:
+          ───────────────────────────────────────────────────────────────────
+          Go to Administration > Accounts > Registration
+          - For open community: Enable "Public Registration"
+          - For members only: Disable "Public Registration" and set "Invite Link" instead
+          
+          ⚠️  IMPORTANT: Save the MongoDB password and Admin password above!
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║      🐧☕ Linux Cafe Haarlem - Community Chat is ready!           ║
+          ╚══════════════════════════════════════════════════════════════════╝
+
+  handlers:
+    - name: Wait for Rocket.Chat
+      pause:
+        seconds: 15
+
+    - name: Reload Caddy
+      become_user: "{{ podman_user }}"
+      command: podman exec caddy caddy reload --config /etc/caddy/Caddyfile
