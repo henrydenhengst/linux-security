@@ -1,6 +1,6 @@
 ---
 - name: Deploy DuckDNS, Caddy, Nginx, and PHP-FPM with Rootless Podman
-  hosts: localhost
+  hosts: all
   become: yes
   gather_facts: yes
 
