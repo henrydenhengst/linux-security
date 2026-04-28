@@ -3,7 +3,7 @@
 # All configuration variables for the web stack
 
 # DuckDNS Configuration
-duckdns_subdomain: "denhengst"
+duckdns_subdomain: "linuxcafehaarlem"
 duckdns_token: "YOUR_TOKEN_HERE"
 duckdns_update_ip: "ipv4"
 
@@ -49,6 +49,6 @@ rocketchat_version: "6.4.8"
 mongodb_version: "7.0"
 
 # Optionele voorgedefinieerde admin credentials
-rocketchat_admin_username: "linuxcafe"
+rocketchat_admin_username: "lch"
 rocketchat_admin_email: "vcp5693@duck.com"
 rocketchat_admin_pass: "JouwSterkeWachtwoord123!"
