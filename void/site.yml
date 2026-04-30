@@ -26,6 +26,7 @@
           - syslog-ng
           - fail2ban
           - zram-enabler
+          - logrotate
         state: present
         update: yes
 
@@ -47,26 +48,21 @@
         - /etc/subgid
 
     # -------------------------------------------------------------------------
-    # 2. DIRECTORY STRUCTURE
+    # 2. SECURITY: KERNEL HARDENING & FIREWALL
     # -------------------------------------------------------------------------
-    - name: Create App Directories
-      file:
-        path: "/home/{{ podman_user }}/containers/{{ item }}"
-        state: directory
-        owner: "{{ podman_user }}"
-        group: "{{ podman_user }}"
-        mode: '0755'
+    - name: Kernel Hardening (Anti-DoS & Spoofing)
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/99-security.conf
       loop:
-        - caddy/data
-        - caddy/config
-        - nginx/html
-        - mattermost/data
-        - mattermost/logs
-        - postgres/data
+        - { name: 'net.ipv4.tcp_syncookies', value: '1' }
+        - { name: 'net.ipv4.conf.all.log_martians', value: '1' }
+        - { name: 'net.ipv4.icmp_echo_ignore_broadcasts', value: '1' }
+        - { name: 'net.ipv4.conf.all.accept_source_route', value: '0' }
+        - { name: 'net.ipv6.conf.all.disable_ipv6', value: '1' }
 
-    # -------------------------------------------------------------------------
-    # 3. SECURITY: FIREWALL & SSH HARDENING
-    # -------------------------------------------------------------------------
     - name: Configure Firewall Rules (IPv4)
       shell: |
         iptables -F
@@ -98,17 +94,25 @@
         - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
       notify: Restart SSH
 
-    - name: Configure Fail2ban Jail
+    - name: Configure Fail2ban Jail & Logrotate
       copy:
-        dest: /etc/fail2ban/jail.local
-        content: |
-          [sshd]
-          enabled = true
-          filter = sshd
-          port = 22
-          logpath = /var/log/messages
-          maxretry = 3
-          bantime = 1d
+        dest: "{{ item.dest }}"
+        content: "{{ item.content }}"
+      loop:
+        - { dest: '/etc/fail2ban/jail.local', content: "[sshd]\nenabled = true\nfilter = sshd\nport = 22\nlogpath = /var/log/messages\nmaxretry = 3\nbantime = 1d" }
+        - { dest: '/etc/logrotate.d/syslog', content: "/var/log/messages /var/log/auth.log {\n    weekly\n    rotate 4\n    compress\n    delaycompress\n    missingok\n    notifempty\n}" }
+
+    # -------------------------------------------------------------------------
+    # 3. DIRECTORY STRUCTURE
+    # -------------------------------------------------------------------------
+    - name: Create App Directories
+      file:
+        path: "/home/{{ podman_user }}/containers/{{ item }}"
+        state: directory
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0755'
+      loop: [caddy/data, caddy/config, nginx/html, mattermost/data, mattermost/logs, postgres/data, backups]
 
     # -------------------------------------------------------------------------
     # 4. CONFIGURATION FILES
@@ -201,15 +205,9 @@
         src: "/etc/sv/{{ item }}"
         dest: "/var/service/{{ item }}"
         state: link
-      loop:
-        - podman-lch
-        - dbus
-        - dcron
-        - syslog-ng
-        - fail2ban
-        - zram-enabler
+      loop: [podman-lch, dbus, dcron, syslog-ng, fail2ban, zram-enabler]
 
-    - name: Setup Cronjobs (System Update & Container Update)
+    - name: Setup Cronjobs
       cron:
         name: "{{ item.name }}"
         user: "{{ item.user }}"
@@ -217,7 +215,8 @@
         hour: "{{ item.hour }}"
         job: "{{ item.job }}"
       loop:
-        - { name: "System Security Updates", user: "root", hour: "3", job: "xbps-install -Syu -y && podman image prune -f" }
+        - { name: "System Updates", user: "root", hour: "3", job: "xbps-install -Syu -y && podman image prune -f" }
+        - { name: "Mattermost DB Backup", user: "root", hour: "2", job: "podman exec mattermost-db pg_dump -U {{ db_user }} {{ db_name }} > /home/{{ podman_user }}/backups/mm_$(date +%F).sql" }
         - { name: "Container Auto-update", user: "{{ podman_user }}", hour: "4", job: "podman auto-update" }
 
   handlers:
