@@ -13,7 +13,7 @@ duckdns_update_ip: "ipv4"
 # DOMAIN & NETWORK
 # ============================================
 # Eigen domein (professioneel)
-custom_domain: "lch.eu"
+custom_domain: "linuxcafehaarlem.nl"
 # DuckDNS als backup/redirect (behouden voor dynamisch IP)
 duckdns_domain: "{{ duckdns_subdomain }}.duckdns.org"
 
