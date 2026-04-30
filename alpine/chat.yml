@@ -1,0 +1,136 @@
+---
+- name: Deploy Rocket.Chat with MongoDB ReplicaSet on Alpine Linux (Rootless)
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars_files:
+    - vars.yml
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # 1. DIRECTORY SETUP & RECHTEN
+    # -------------------------------------------------------------------------
+    - name: Create Rocket.Chat and MongoDB directories
+      file:
+        path: "/home/{{ podman_user }}/containers/{{ item }}"
+        state: directory
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0755'
+      loop:
+        - rocketchat/data
+        - rocketchat/uploads
+        - mongodb/data
+        - mongodb/backups
+        - bin
+
+    # -------------------------------------------------------------------------
+    # 2. MONGODB SECURITY CONFIG
+    # -------------------------------------------------------------------------
+    - name: Generate MongoDB keyfile (ReplicaSet Auth)
+      shell: |
+        openssl rand -base64 756 > /home/{{ podman_user }}/containers/mongodb/keyfile
+        chmod 400 /home/{{ podman_user }}/containers/mongodb/keyfile
+        chown {{ podman_user }}:{{ podman_user }} /home/{{ podman_user }}/containers/mongodb/keyfile
+      args:
+        creates: "/home/{{ podman_user }}/containers/mongodb/keyfile"
+
+    # -------------------------------------------------------------------------
+    # 3. DEPLOY MONGODB (RS0)
+    # -------------------------------------------------------------------------
+    - name: Deploy MongoDB container
+      become_user: "{{ podman_user }}"
+      containers.podman.podman_container:
+        name: rocketchat-db
+        image: "docker.io/mongo:{{ mongodb_version | default('6.0') }}"
+        state: started
+        restart_policy: unless-stopped
+        network: webnet
+        volumes:
+          - "/home/{{ podman_user }}/containers/mongodb/data:/data/db:Z"
+          - "/home/{{ podman_user }}/containers/mongodb/keyfile:/opt/keyfile:Z"
+        env:
+          MONGO_INITDB_ROOT_USERNAME: "root"
+          MONGO_INITDB_ROOT_PASSWORD: "{{ rocketchat_mongodb_password }}"
+        command: >
+          mongod --replSet rs0 --keyFile /opt/keyfile --bind_ip_all --auth
+
+    - name: Wait for MongoDB socket
+      pause:
+        seconds: 15
+
+    - name: Initialize MongoDB ReplicaSet
+      become_user: "{{ podman_user }}"
+      command: >
+        podman exec rocketchat-db mongosh -u root -p {{ rocketchat_mongodb_password }} --quiet --eval 
+        "try { rs.status() } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'rocketchat-db:27017' }] }) }"
+      register: rs_init
+      changed_when: "'ok: 1' in rs_init.stdout"
+      failed_when: false
+
+    # -------------------------------------------------------------------------
+    # 4. DEPLOY ROCKET.CHAT
+    # -------------------------------------------------------------------------
+    - name: Deploy Rocket.Chat container
+      become_user: "{{ podman_user }}"
+      containers.podman.podman_container:
+        name: rocketchat-app
+        image: "docker.io/rocketchat/rocket.chat:{{ rocketchat_version | default('latest') }}"
+        state: started
+        restart_policy: unless-stopped
+        network: webnet
+        ports:
+          - "{{ rocketchat_port }}:3000"
+        volumes:
+          - "/home/{{ podman_user }}/containers/rocketchat/uploads:/app/uploads:Z"
+        env:
+          MONGO_URL: "mongodb://root:{{ rocketchat_mongodb_password }}@rocketchat-db:27017/{{ rocketchat_mongodb_database }}?replicaSet=rs0&authSource=admin"
+          MONGO_OPLOG_URL: "mongodb://root:{{ rocketchat_mongodb_password }}@rocketchat-db:27017/local?replicaSet=rs0&authSource=admin"
+          ROOT_URL: "https://chat.{{ domain_name }}"
+          PORT: "3000"
+          DEPLOY_METHOD: "podman_alpine"
+          OVERWRITE_SETTING_Show_Setup_Wizard: "completed"
+
+    # -------------------------------------------------------------------------
+    # 5. CADDY & FIREWALL (ALPINE SPECIFIC)
+    # -------------------------------------------------------------------------
+    - name: Update Caddyfile for Rocket.Chat
+      blockinfile:
+        path: "/home/{{ podman_user }}/containers/caddy/Caddyfile"
+        marker: "# {mark} ROCKET.CHAT"
+        content: |
+          chat.{{ domain_name }} {
+              reverse_proxy rocketchat-app:3000
+              encode gzip zstd
+          }
+      notify: Reload Caddy
+
+    # In Alpine gebruiken we geen firewalld maar awall (zie vorig script)
+    # We gaan ervan uit dat poort 80/443 al open staan via de algemene setup.
+
+    # -------------------------------------------------------------------------
+    # 6. PERSISTENCE & BACKUP
+    # -------------------------------------------------------------------------
+    - name: Create Alpine Backup Script
+      copy:
+        dest: "/home/{{ podman_user }}/bin/backup-rocketchat.sh"
+        content: |
+          #!/bin/sh
+          DATE=$(date +%Y%m%d)
+          podman exec rocketchat-db mongodump -u root -p {{ rocketchat_mongodb_password }} --archive > /home/{{ podman_user }}/containers/mongodb/backups/db_${DATE}.archive
+        owner: "{{ podman_user }}"
+        mode: '0755'
+
+    - name: Add Cron job for backup
+      cron:
+        name: "RocketChat Backup"
+        user: "{{ podman_user }}"
+        hour: "3"
+        minute: "0"
+        job: "/home/{{ podman_user }}/bin/backup-rocketchat.sh"
+
+  handlers:
+    - name: Reload Caddy
+      become_user: "{{ podman_user }}"
+      command: podman exec caddy caddy reload --config /etc/caddy/Caddyfile
