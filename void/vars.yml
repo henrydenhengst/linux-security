@@ -1,0 +1,58 @@
+# ============================================
+# DUCKDNS CONFIGURATION
+# ============================================
+duckdns_subdomain: "linuxcafehaarlem"
+duckdns_token: "YOUR_TOKEN_HERE"
+duckdns_update_ip: "ipv4"
+
+# ============================================
+# DOMAIN & NETWORK
+# ============================================
+custom_domain: "linuxcafehaarlem.nl"
+duckdns_domain: "{{ duckdns_subdomain }}.duckdns.org"
+domain_name: "{{ custom_domain }}"
+timezone: "Europe/Amsterdam"
+
+# ============================================
+# USER CONFIGURATION
+# ============================================
+podman_user: "poduser"
+container_user_uid: 1000
+# Void gebruikt vaak geen specifieke gid in de user module tenzij gevraagd
+container_user_gid: 1000 
+
+# ============================================
+# CONTAINER VERSIONS (Geoptimaliseerd voor Void/Oude hardware)
+# ============================================
+caddy_version: "alpine"       # Alpine is lichter dan 'latest'
+nginx_version: "alpine"
+duckdns_version: "latest"
+mattermost_version: "latest"  # Mattermost i.p.v. Rocket.Chat
+postgres_version: "16-alpine" # PostgreSQL i.p.v. MongoDB (GEEN AVX NODIG!)
+
+# ============================================
+# MATTERMOST CONFIGURATION
+# ============================================
+mattermost_port: 8065
+db_user: "mmuser"
+db_password: "KiesHierEenSterkWachtwoord123!"
+db_name: "mattermost"
+
+# Admin info (voor je eigen administratie)
+admin_email: "vcp5693@duck.com"
+
+# ============================================
+# SECURITY & SYSTEM
+# ============================================
+# Void heeft geen SELinux, we zetten dit op false om fouten te voorkomen
+selinux_enabled: false
+open_ports:
+  - 80
+  - 443
+  - 22
+
+# ============================================
+# HUGO / NGINX SETTINGS
+# ============================================
+# Map waar je Hugo 'public' files komen te staan
+hugo_site_path: "/home/{{ podman_user }}/containers/nginx/html"
