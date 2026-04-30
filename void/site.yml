@@ -1,24 +1,16 @@
 ---
-- name: Deploy LCH Stack on Void Linux
+- name: Deploy Autonomous & Hardened LCH Stack on Void Linux
   hosts: localhost
   become: yes
   gather_facts: yes
 
-  vars:
-    podman_user: "poduser"
-    container_user_uid: 1001
-    domain_name: "jouwdomein.nl"
-    admin_email: "admin@{{ domain_name }}"
-    postgres_version: "16-alpine"
-    mattermost_version: "9.5"
-    caddy_version: "2.7-alpine"
-    db_user: "mmuser"
-    db_name: "mattermost"
-    db_password: "CHANGEME_SECURE_PASSWORD"
-    # alert_webhook: "https://discord.com/api/webhooks/..." # Optioneel
+  vars_files:
+    - vars.yml
 
   tasks:
-    # 1. SYSTEM BASE
+    # -------------------------------------------------------------------------
+    # 1. SYSTEM & PERSISTENCE
+    # -------------------------------------------------------------------------
     - name: Install System Packages
       xbps:
         name: [podman, curl, git, python3, dbus, iptables, dcron, syslog-ng, fail2ban, zram-enabler, logrotate, elogind]
@@ -34,13 +26,20 @@
       changed_when: false
 
     - name: Create Podman User
-      user: { name: "{{ podman_user }}", uid: "{{ container_user_uid }}", groups: wheel, create_home: yes }
+      user: 
+        name: "{{ podman_user }}"
+        uid: "{{ container_user_uid }}"
+        group: "{{ container_user_gid | default(container_user_uid) }}"
+        groups: wheel
+        create_home: yes
 
     - name: Configure SubUID/GID
       lineinfile: { path: "/etc/{{ item }}", line: "{{ podman_user }}:100000:65536", create: yes }
       loop: [subuid, subgid]
 
+    # -------------------------------------------------------------------------
     # 2. FIREWALL & FAIL2BAN
+    # -------------------------------------------------------------------------
     - name: Write Iptables Rules
       copy:
         dest: /etc/iptables.rules
@@ -67,7 +66,7 @@
         mode: '0755'
         content: "#!/bin/sh\niptables-restore < /etc/iptables.rules\nexec pause"
 
-    - name: Configure Fail2ban (Void Log Source)
+    - name: Configure Fail2ban
       copy:
         dest: /etc/fail2ban/jail.local
         content: |
@@ -79,7 +78,9 @@
           maxretry = 3
           bantime = 1h
 
+    # -------------------------------------------------------------------------
     # 3. STORAGE & CONFIG
+    # -------------------------------------------------------------------------
     - name: Create App Directories
       file:
         path: "/home/{{ podman_user }}/containers/{{ item }}"
@@ -113,7 +114,9 @@
               reverse_proxy localhost:8065
           }
 
+    # -------------------------------------------------------------------------
     # 4. PODMAN POD & CONTAINERS
+    # -------------------------------------------------------------------------
     - name: Create LCH Pod
       containers.podman.podman_pod:
         name: lch-pod
@@ -122,7 +125,7 @@
         ports: ["80:80", "443:443"]
       become_user: "{{ podman_user }}"
 
-    - name: Deploy Containers
+    - name: Deploy Infrastructure
       containers.podman.podman_container:
         name: "{{ item.name }}"
         pod: lch-pod
@@ -158,16 +161,19 @@
           memory: "256m"
           volumes: ["/home/{{ podman_user }}/containers/caddy/Caddyfile:/etc/caddy/Caddyfile:z", "/home/{{ podman_user }}/containers/caddy/data:/data:z", "/home/{{ podman_user }}/containers/caddy/config:/config:z", "/home/{{ podman_user }}/containers/hugo_site:/var/www/hugo:z"]
 
+    # -------------------------------------------------------------------------
     # 5. AUTONOMOUS MAINTENANCE
-    - name: Enable Final Services
+    # -------------------------------------------------------------------------
+    - name: Enable Maintenance Services
       file: { src: "/etc/sv/{{ item }}", dest: "/var/service/{{ item }}", state: link }
       loop: [dcron, syslog-ng, fail2ban, zram-enabler, iptables-restore]
 
-    - name: Setup Autonomous Cronjobs
+    - name: Setup Cronjobs
       cron:
         name: "{{ item.name }}"
         user: "{{ item.user }}"
         minute: "{{ item.minute | default('0') }}"
+        hour: "{{ item.hour | default('*') }}"
         job: "{{ item.job }}"
       loop:
         - name: "LCH Watchdog"
@@ -175,35 +181,34 @@
           minute: "*/5"
           job: >
             podman ps --format '{% raw %}{{.Names}} {{.Status}}{% endraw %}' | grep -w unhealthy | awk '{print $1}' | while read c; do
-              COUNT_FILE=/var/tmp/watchdog_$c.count;
-              COUNT=$(cat $COUNT_FILE 2>/dev/null || echo 0);
-              if [ $COUNT -lt 3 ]; then
-                if [ "$c" = "mattermost-db" ]; then podman restart mattermost-db && sleep 10 && podman restart mattermost-app; else podman restart $c; fi;
-                echo $((COUNT+1)) > $COUNT_FILE;
-                logger "WATCHDOG: Recovered $c (Attempt $((COUNT+1)))";
-              else
-                logger "CRITICAL: Watchdog failure on $c";
-                [ -n "{{ alert_webhook | default('') }}" ] && curl -X POST -H "Content-Type: application/json" -d "{\"text\":\"🚨 Watchdog gave up on $c\"}" {{ alert_webhook }};
-              fi;
-            done;
+            COUNT_FILE=/var/tmp/watchdog_$c.count;
+            COUNT=$(cat $COUNT_FILE 2>/dev/null || echo 0);
+            if [ $COUNT -lt 3 ]; then
+            if [ "$c" = "mattermost-db" ]; then podman restart mattermost-db && sleep 10 && podman restart mattermost-app; else podman restart $c; fi;
+            echo $((COUNT+1)) > $COUNT_FILE;
+            logger "WATCHDOG: Recovered $c (Attempt $((COUNT+1)))";
+            else
+            logger "CRITICAL: Watchdog gave up on $c";
+            [ -n "{{ alert_webhook | default('') }}" ] && curl -X POST -H "Content-Type: application/json" -d "{\"text\":\"🚨 Watchdog gave up on $c\"}" {{ alert_webhook | default('http://localhost') }};
+            fi; done;
             find /var/tmp/watchdog_*.count -mmin +60 -delete 2>/dev/null
 
-        - name: "DB Backup & Restore Test"
+        - name: "DB Backup & Test"
           user: "{{ podman_user }}"
           minute: "30"
           hour: "2"
           job: >
             if [ $(df --output=pcent / | tail -1 | tr -dc '0-9') -lt 90 ]; then
-              BACKUP_FILE=/home/{{ podman_user }}/backups/mm_$(date +%F).sql.gz;
-              podman exec mattermost-db pg_dump -U {{ db_user }} {{ db_name }} | gzip > $BACKUP_FILE &&
-              gzip -t $BACKUP_FILE &&
-              podman exec mattermost-db bash -c "createdb -U {{ db_user }} test_restore && gunzip -c /home/{{ podman_user }}/backups/mm_$(date +%F).sql.gz | psql -U {{ db_user }} test_restore && dropdb -U {{ db_user }} test_restore" &&
-              find /home/{{ podman_user }}/backups/ -name '*.gz' -mtime +7 -delete ||
-              (logger "CRITICAL: Backup/Restore failed"; [ -n "{{ alert_webhook | default('') }}" ] && curl -X POST -d "{\"text\":\"❌ Backup failure Haarlem\"}" {{ alert_webhook }})
+            B_FILE=/home/{{ podman_user }}/backups/mm_$(date +\%F).sql.gz;
+            podman exec mattermost-db pg_dump -U {{ db_user }} {{ db_name }} | gzip > $B_FILE &&
+            gzip -t $B_FILE &&
+            podman exec mattermost-db bash -c "createdb -U {{ db_user }} test_restore && gunzip -c /home/{{ podman_user }}/backups/mm_$(date +\%F).sql.gz | psql -U {{ db_user }} test_restore && dropdb -U {{ db_user }} test_restore" &&
+            find /home/{{ podman_user }}/backups/ -name '*.gz' -mtime +7 -delete ||
+            (logger "CRITICAL: Backup/Test failed"; [ -n "{{ alert_webhook | default('') }}" ] && curl -X POST -d "{\"text\":\"❌ Backup failure\"}" {{ alert_webhook | default('http://localhost') }})
             fi
 
         - { name: "System Maintenance", user: "root", minute: "10", hour: "3", job: "(/usr/bin/xbps-install -Syu -y && podman image prune -af) || logger 'Update failed'" }
-        - { name: "Container Auto-update", user: "{{ podman_user }}", minute: "20", hour: "4", job: "podman auto-update" }
+        - { name: "Container Updates", user: "{{ podman_user }}", minute: "20", hour: "4", job: "podman auto-update" }
 
   handlers:
     - name: Restart SSH
