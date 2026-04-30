@@ -1,13 +1,17 @@
 ---
-- name: Configureer Alpine Linux met Podman en Security
+- name: Setup Alpine Linux Container Host (Podman & Security)
   hosts: all
   become: yes
+  vars:
+    # De gebruiker die rootless podman gaat draaien
+    container_user: alpine
+
   tasks:
-    - name: Update de pakketindex
+    - name: 1. Update pakketindex
       community.general.apk:
         update_cache: yes
 
-    - name: Installeer Podman, Buildah en Skopeo
+    - name: 2. Installeer Container Stack (Podman, Buildah, Skopeo)
       community.general.apk:
         name:
           - podman
@@ -15,45 +19,99 @@
           - skopeo
           - slirp4netns
           - fuse-overlayfs
+          - shadow-uidmap # Nodig voor subuid/subgid mapping
         state: present
 
-    - name: Zorg dat de tun module geladen wordt (voor rootless networking)
-      community.general.modprobe:
-        name: tun
-        state: present
-
-    - name: Installeer en configureer de firewall (awall)
+    - name: 3. Installeer Security & Systeem tools
       community.general.apk:
-        name: awall
+        name:
+          - fail2ban
+          - python3
+          - awall
+          - ip6tables
+          - dcron
+          - syslog-ng
         state: present
 
-    - name: Maak firewall configuratie voor SSH, HTTP en HTTPS
+    - name: 4. Configureer Kernel Modules voor Podman
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - tun
+        - overlay
+
+    - name: 5. Configureer Rootless UID/GID mapping
+      copy:
+        dest: "{{ item }}"
+        content: "{{ container_user }}:100000:65536\n"
+      loop:
+        - /etc/subuid
+        - /etc/subgid
+
+    - name: 6. Setup Firewall (Awall)
       copy:
         dest: /etc/awall/optional/webserver.json
         content: |
           {
             "description": "Sta SSH en Webverkeer toe",
             "filter": [
-              { "in": "internet", "out": "_fw", "service": ["ssh", "http", "https"], "action": "accept" }
+              { 
+                "in": "internet", 
+                "out": "_fw", 
+                "service": ["ssh", "http", "https"], 
+                "action": "accept" 
+              }
             ]
           }
 
-    - name: Activeer de firewall policies
-      command: awall enable webserver
-      
-    - name: Pas firewall wijzigingen toe
-      command: awall activate
-      
-    - name: Zorg dat SSH service draait
+    - name: 7. Activeer Firewall regels
+      shell: |
+        awall enable webserver
+        awall activate
+      args:
+        creates: /etc/iptables/rules.v4
+
+    - name: 8. Configureer Fail2ban (Jail Setup)
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [DEFAULT]
+          bantime = 1h
+          findtime = 10m
+          maxretry = 5
+
+          [sshd]
+          enabled = true
+          port = ssh
+          filter = sshd
+          logpath = /var/log/messages
+          backend = auto
+
+    - name: 9. Setup Automatische Updates (Cron)
+      cron:
+        name: "Dagelijkse systeem updates"
+        user: root
+        minute: "0"
+        hour: "3"
+        job: "apk update && apk upgrade"
+
+    - name: 10. Wekelijkse Container Opschoning (Prune)
+      cron:
+        name: "Wekelijkse podman cleanup"
+        user: root
+        minute: "30"
+        hour: "3"
+        weekday: "0"
+        job: "podman system prune -f"
+
+    - name: 11. Start en activeer Services (OpenRC)
       service:
-        name: sshd
+        name: "{{ item }}"
         state: started
         enabled: yes
-
-    - name: Configureer subuid/subgid voor rootless Podman
-      copy:
-        dest: "{{ item }}"
-        content: "alpine:100000:65536\n"
       loop:
-        - /etc/subuid
-        - /etc/subgid
+        - syslog-ng
+        - fail2ban
+        - dcron
+        - sshd
