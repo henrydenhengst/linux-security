@@ -1,5 +1,5 @@
 ---
-- name: Deploy LCH Stack on Void Linux
+- name: Deploy Autonomous & Hardened LCH Stack on Void Linux
   hosts: localhost
   become: yes
   gather_facts: yes
@@ -9,7 +9,7 @@
 
   tasks:
     # -------------------------------------------------------------------------
-    # 1. SYSTEM & PERSISTENCE
+    # 1. SYSTEM BASE & PERMISSIONS
     # -------------------------------------------------------------------------
     - name: Install System Packages
       xbps:
@@ -29,7 +29,7 @@
       user: 
         name: "{{ podman_user }}"
         uid: "{{ container_user_uid }}"
-        group: "{{ container_user_gid | default(container_user_uid) }}"
+        group: "{{ container_user_gid }}"
         groups: wheel
         create_home: yes
 
@@ -38,7 +38,7 @@
       loop: [subuid, subgid]
 
     # -------------------------------------------------------------------------
-    # 2. FIREWALL & FAIL2BAN
+    # 2. NETWORK & SECURITY
     # -------------------------------------------------------------------------
     - name: Write Iptables Rules
       copy:
@@ -57,7 +57,7 @@
           -A INPUT -p tcp --dport 443 -j ACCEPT
           COMMIT
 
-    - name: Create iptables-restore Runit Service
+    - name: Create iptables-restore Service
       file: { path: /etc/sv/iptables-restore, state: directory }
 
     - name: Create iptables-restore Run Script
@@ -79,7 +79,7 @@
           bantime = 1h
 
     # -------------------------------------------------------------------------
-    # 3. STORAGE & CONFIG
+    # 3. STORAGE & CADDY
     # -------------------------------------------------------------------------
     - name: Create App Directories
       file:
@@ -115,17 +115,18 @@
           }
 
     # -------------------------------------------------------------------------
-    # 4. PODMAN POD & CONTAINERS
+    # 4. PODMAN STACK
     # -------------------------------------------------------------------------
     - name: Create LCH Pod
       containers.podman.podman_pod:
         name: lch-pod
         state: present
         recreate: yes
+        stop_timeout: 30
         ports: ["80:80", "443:443"]
       become_user: "{{ podman_user }}"
 
-    - name: Deploy Infrastructure
+    - name: Deploy Infrastructure Containers
       containers.podman.podman_container:
         name: "{{ item.name }}"
         pod: lch-pod
@@ -162,13 +163,13 @@
           volumes: ["/home/{{ podman_user }}/containers/caddy/Caddyfile:/etc/caddy/Caddyfile:z", "/home/{{ podman_user }}/containers/caddy/data:/data:z", "/home/{{ podman_user }}/containers/caddy/config:/config:z", "/home/{{ podman_user }}/containers/hugo_site:/var/www/hugo:z"]
 
     # -------------------------------------------------------------------------
-    # 5. AUTONOMOUS MAINTENANCE
+    # 5. AUTONOMOUS SURVIVAL (Watchdog, Backup, DNS)
     # -------------------------------------------------------------------------
     - name: Enable Maintenance Services
       file: { src: "/etc/sv/{{ item }}", dest: "/var/service/{{ item }}", state: link }
       loop: [dcron, syslog-ng, fail2ban, zram-enabler, iptables-restore]
 
-    - name: Setup Cronjobs
+    - name: Setup Final Cronjobs
       cron:
         name: "{{ item.name }}"
         user: "{{ item.user }}"
@@ -181,34 +182,30 @@
           minute: "*/5"
           job: >
             podman ps --format '{% raw %}{{.Names}} {{.Status}}{% endraw %}' | grep -w unhealthy | awk '{print $1}' | while read c; do
-            COUNT_FILE=/var/tmp/watchdog_$c.count;
-            COUNT=$(cat $COUNT_FILE 2>/dev/null || echo 0);
+            C_FILE=/var/tmp/watchdog_$c.count; COUNT=$(cat $C_FILE 2>/dev/null || echo 0);
             if [ $COUNT -lt 3 ]; then
             if [ "$c" = "mattermost-db" ]; then podman restart mattermost-db && sleep 10 && podman restart mattermost-app; else podman restart $c; fi;
-            echo $((COUNT+1)) > $COUNT_FILE;
-            logger "WATCHDOG: Recovered $c (Attempt $((COUNT+1)))";
-            else
-            logger "CRITICAL: Watchdog gave up on $c";
+            echo $((COUNT+1)) > $C_FILE; logger "WATCHDOG: Restarted $c (Attempt $((COUNT+1)))";
+            else logger "CRITICAL: Watchdog failed on $c";
             [ -n "{{ alert_webhook | default('') }}" ] && curl -X POST -H "Content-Type: application/json" -d "{\"text\":\"🚨 Watchdog gave up on $c\"}" {{ alert_webhook | default('http://localhost') }};
-            fi; done;
-            find /var/tmp/watchdog_*.count -mmin +60 -delete 2>/dev/null
+            fi; done; find /var/tmp/watchdog_*.count -mmin +60 -delete 2>/dev/null
 
-        - name: "DB Backup & Test"
+        - name: "DB Backup & Audit"
           user: "{{ podman_user }}"
           minute: "30"
           hour: "2"
           job: >
             if [ $(df --output=pcent / | tail -1 | tr -dc '0-9') -lt 90 ]; then
             B_FILE=/home/{{ podman_user }}/backups/mm_$(date +\%F).sql.gz;
-            podman exec mattermost-db pg_dump -U {{ db_user }} {{ db_name }} | gzip > $B_FILE &&
-            gzip -t $B_FILE &&
-            podman exec mattermost-db bash -c "createdb -U {{ db_user }} test_restore && gunzip -c /home/{{ podman_user }}/backups/mm_$(date +\%F).sql.gz | psql -U {{ db_user }} test_restore && dropdb -U {{ db_user }} test_restore" &&
+            podman exec mattermost-db pg_dump -U {{ db_user }} {{ db_name }} | gzip > $B_FILE && gzip -t $B_FILE &&
+            podman exec mattermost-db bash -c "createdb -U {{ db_user }} test_audit && gunzip -c /home/{{ podman_user }}/backups/mm_$(date +\%F).sql.gz | psql -U {{ db_user }} test_audit && dropdb -U {{ db_user }} test_audit" &&
             find /home/{{ podman_user }}/backups/ -name '*.gz' -mtime +7 -delete ||
-            (logger "CRITICAL: Backup/Test failed"; [ -n "{{ alert_webhook | default('') }}" ] && curl -X POST -d "{\"text\":\"❌ Backup failure\"}" {{ alert_webhook | default('http://localhost') }})
+            (logger "CRITICAL: Backup Audit failed"; [ -n "{{ alert_webhook | default('') }}" ] && curl -X POST -d "{\"text\":\"❌ Backup Audit failure\"}" {{ alert_webhook | default('http://localhost') }})
             fi
 
+        - { name: "DuckDNS Update", user: "{{ podman_user }}", minute: "*/15", job: "curl -s \"https://www.duckdns.org/update?domains={{ duckdns_subdomain }}&token={{ duckdns_token }}&ip=\" > /dev/null" }
         - { name: "System Maintenance", user: "root", minute: "10", hour: "3", job: "(/usr/bin/xbps-install -Syu -y && podman image prune -af) || logger 'Update failed'" }
-        - { name: "Container Updates", user: "{{ podman_user }}", minute: "20", hour: "4", job: "podman auto-update" }
+        - { name: "Container Auto-update", user: "{{ podman_user }}", minute: "20", hour: "4", job: "podman auto-update" }
 
   handlers:
     - name: Restart SSH
