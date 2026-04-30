@@ -1,110 +1,85 @@
 ---
-- name: Deploy Full LCH Stack on Void Linux (Mattermost)
+- name: Deploy LCH Stack on Void Linux
   hosts: localhost
   become: yes
   gather_facts: yes
 
-  vars_files:
-    - vars.yml
+  vars:
+    podman_user: "poduser"
+    container_user_uid: 1001
+    domain_name: "jouwdomein.nl"
+    admin_email: "admin@{{ domain_name }}"
+    postgres_version: "16-alpine"
+    mattermost_version: "9.5"
+    caddy_version: "2.7-alpine"
+    db_user: "mmuser"
+    db_name: "mattermost"
+    db_password: "CHANGEME_SECURE_PASSWORD"
+    # alert_webhook: "https://discord.com/api/webhooks/..." # Optioneel
 
   tasks:
-    # -------------------------------------------------------------------------
-    # 1. VOID SYSTEM & REPO PREPARATION
-    # -------------------------------------------------------------------------
-    - name: Install Core System Packages
+    # 1. SYSTEM BASE
+    - name: Install System Packages
       xbps:
-        name:
-          - podman
-          - curl
-          - git
-          - python3
-          - dbus
-          - sudo
-          - ip6tables
-          - iptables
-          - dcron
-          - syslog-ng
-          - fail2ban
-          - zram-enabler
-          - logrotate
+        name: [podman, curl, git, python3, dbus, iptables, dcron, syslog-ng, fail2ban, zram-enabler, logrotate, elogind]
         state: present
         update: yes
 
-    - name: Ensure podman user exists
-      user:
-        name: "{{ podman_user }}"
-        shell: /bin/sh
-        state: present
-        create_home: yes
-        uid: "{{ container_user_uid }}"
-        groups: wheel
+    - name: Ensure DBus and Elogind are active
+      file: { src: "/etc/sv/{{ item }}", dest: "/var/service/{{ item }}", state: link }
+      loop: [dbus, elogind]
 
-    - name: Configure Rootless Mapping
+    - name: Enable Linger for Podman User
+      command: "loginctl enable-linger {{ podman_user }}"
+      changed_when: false
+
+    - name: Create Podman User
+      user: { name: "{{ podman_user }}", uid: "{{ container_user_uid }}", groups: wheel, create_home: yes }
+
+    - name: Configure SubUID/GID
+      lineinfile: { path: "/etc/{{ item }}", line: "{{ podman_user }}:100000:65536", create: yes }
+      loop: [subuid, subgid]
+
+    # 2. FIREWALL & FAIL2BAN
+    - name: Write Iptables Rules
       copy:
-        dest: "{{ item }}"
-        content: "{{ podman_user }}:100000:65536\n"
-      loop:
-        - /etc/subuid
-        - /etc/subgid
-
-    # -------------------------------------------------------------------------
-    # 2. SECURITY: KERNEL HARDENING & FIREWALL
-    # -------------------------------------------------------------------------
-    - name: Kernel Hardening (Anti-DoS & Spoofing)
-      sysctl:
-        name: "{{ item.name }}"
-        value: "{{ item.value }}"
-        state: present
-        sysctl_file: /etc/sysctl.d/99-security.conf
-      loop:
-        - { name: 'net.ipv4.tcp_syncookies', value: '1' }
-        - { name: 'net.ipv4.conf.all.log_martians', value: '1' }
-        - { name: 'net.ipv4.icmp_echo_ignore_broadcasts', value: '1' }
-        - { name: 'net.ipv4.conf.all.accept_source_route', value: '0' }
-        - { name: 'net.ipv6.conf.all.disable_ipv6', value: '1' }
-
-    - name: Configure Firewall Rules (IPv4)
-      shell: |
-        iptables -F
-        iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-        iptables -A INPUT -i lo -j ACCEPT
-        iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-        iptables -A INPUT -p tcp --dport 80 -j ACCEPT
-        iptables -A INPUT -p tcp --dport 443 -j ACCEPT
-        iptables -P INPUT DROP
-        iptables -P FORWARD DROP
-        iptables-save > /etc/iptables.rules
-
-    - name: Ensure Firewall persists after reboot
-      copy:
-        dest: /etc/rc.local
+        dest: /etc/iptables.rules
         content: |
-          #!/bin/sh
-          iptables-restore < /etc/iptables.rules
-          exit 0
-        mode: '0755'
+          *filter
+          :INPUT DROP [0:0]
+          :FORWARD DROP [0:0]
+          :OUTPUT ACCEPT [0:0]
+          -A INPUT -m conntrack --ctstate INVALID -j DROP
+          -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+          -A INPUT -i lo -j ACCEPT
+          -A INPUT -p icmp -j ACCEPT
+          -A INPUT -p tcp --dport 22 -j ACCEPT
+          -A INPUT -p tcp --dport 80 -j ACCEPT
+          -A INPUT -p tcp --dport 443 -j ACCEPT
+          COMMIT
 
-    - name: SSH Hardening - Disable Passwords
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-      loop:
-        - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin no' }
-        - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
-      notify: Restart SSH
+    - name: Create iptables-restore Runit Service
+      file: { path: /etc/sv/iptables-restore, state: directory }
 
-    - name: Configure Fail2ban Jail & Logrotate
+    - name: Create iptables-restore Run Script
       copy:
-        dest: "{{ item.dest }}"
-        content: "{{ item.content }}"
-      loop:
-        - { dest: '/etc/fail2ban/jail.local', content: "[sshd]\nenabled = true\nfilter = sshd\nport = 22\nlogpath = /var/log/messages\nmaxretry = 3\nbantime = 1d" }
-        - { dest: '/etc/logrotate.d/syslog', content: "/var/log/messages /var/log/auth.log {\n    weekly\n    rotate 4\n    compress\n    delaycompress\n    missingok\n    notifempty\n}" }
+        dest: /etc/sv/iptables-restore/run
+        mode: '0755'
+        content: "#!/bin/sh\niptables-restore < /etc/iptables.rules\nexec pause"
 
-    # -------------------------------------------------------------------------
-    # 3. DIRECTORY STRUCTURE
-    # -------------------------------------------------------------------------
+    - name: Configure Fail2ban (Void Log Source)
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [sshd]
+          enabled = true
+          port = 22
+          filter = sshd
+          logpath = /var/log/messages
+          maxretry = 3
+          bantime = 1h
+
+    # 3. STORAGE & CONFIG
     - name: Create App Directories
       file:
         path: "/home/{{ podman_user }}/containers/{{ item }}"
@@ -112,112 +87,123 @@
         owner: "{{ podman_user }}"
         group: "{{ podman_user }}"
         mode: '0755'
-      loop: [caddy/data, caddy/config, nginx/html, mattermost/data, mattermost/logs, postgres/data, backups]
+      loop: [caddy/data, caddy/config, hugo_site, mattermost/data, postgres/data, backups]
 
-    # -------------------------------------------------------------------------
-    # 4. CONFIGURATION FILES
-    # -------------------------------------------------------------------------
     - name: Create Caddyfile
       copy:
         dest: "/home/{{ podman_user }}/containers/caddy/Caddyfile"
+        owner: "{{ podman_user }}"
         content: |
+          {
+              email {{ admin_email }}
+          }
           {{ domain_name }} {
-              reverse_proxy nginx:80
+              root * /var/www/hugo
+              file_server
+              encode zstd gzip
+              tls { protocols tls1.2 tls1.3 }
+              header {
+                  Strict-Transport-Security "max-age=31536000;"
+                  X-Content-Type-Options nosniff
+                  X-Frame-Options DENY
+                  Referrer-Policy strict-origin-when-cross-origin
+              }
           }
           chat.{{ domain_name }} {
-              reverse_proxy mattermost-app:8065
+              reverse_proxy localhost:8065
           }
-        owner: "{{ podman_user }}"
 
-    # -------------------------------------------------------------------------
-    # 5. NETWORK & CONTAINERS
-    # -------------------------------------------------------------------------
-    - name: Create Podman Network
+    # 4. PODMAN POD & CONTAINERS
+    - name: Create LCH Pod
+      containers.podman.podman_pod:
+        name: lch-pod
+        state: present
+        recreate: yes
+        ports: ["80:80", "443:443"]
       become_user: "{{ podman_user }}"
-      command: podman network exists lchnet || podman network create lchnet
 
-    - name: Deploy PostgreSQL (Mattermost DB)
-      become_user: "{{ podman_user }}"
-      containers.podman.podman_container:
-        name: mattermost-db
-        image: "docker.io/library/postgres:{{ postgres_version }}"
-        state: started
-        restart_policy: always
-        network: lchnet
-        env:
-          POSTGRES_USER: "{{ db_user }}"
-          POSTGRES_PASSWORD: "{{ db_password }}"
-          POSTGRES_DB: "{{ db_name }}"
-        volumes:
-          - "/home/{{ podman_user }}/containers/postgres/data:/var/lib/postgresql/data:Z"
-
-    - name: Deploy Mattermost App
-      become_user: "{{ podman_user }}"
-      containers.podman.podman_container:
-        name: mattermost-app
-        image: "docker.io/mattermost/mattermost-team-edition:{{ mattermost_version }}"
-        state: started
-        restart_policy: always
-        network: lchnet
-        env:
-          MM_SQLSETTINGS_DRIVERNAME: "postgres"
-          MM_SQLSETTINGS_DATASOURCE: "postgres://{{ db_user }}:{{ db_password }}@mattermost-db:5432/{{ db_name }}?sslmode=disable&connect_timeout=10"
-          MM_SERVICESETTINGS_SITEURL: "https://chat.{{ domain_name }}"
-        volumes:
-          - "/home/{{ podman_user }}/containers/mattermost/data:/mattermost/data:Z"
-          - "/home/{{ podman_user }}/containers/mattermost/logs:/mattermost/logs:Z"
-        labels:
-          io.containers.autoupdate: "image"
-
-    - name: Deploy Web Proxy (Caddy & Nginx)
-      become_user: "{{ podman_user }}"
+    - name: Deploy Containers
       containers.podman.podman_container:
         name: "{{ item.name }}"
+        pod: lch-pod
         image: "{{ item.image }}"
         state: started
         restart_policy: always
-        network: lchnet
-        ports: "{{ item.ports | default(omit) }}"
-        volumes: "{{ item.volumes | default(omit) }}"
+        memory: "{{ item.memory }}"
+        log_driver: k8s-file
+        log_opt: "max-size=10mb,max-file=3"
+        env: "{{ item.env | default(omit) }}"
+        volumes: "{{ item.volumes }}"
+        healthcheck: "{{ item.healthcheck | default(omit) }}"
+        labels: "{{ item.labels | default(omit) }}"
+      become_user: "{{ podman_user }}"
       loop:
-        - { name: 'nginx', image: "docker.io/nginx:{{ nginx_version }}", volumes: ["/home/{{ podman_user }}/containers/nginx/html:/usr/share/nginx/html:Z"] }
-        - { name: 'caddy', image: "docker.io/caddy:{{ caddy_version }}", ports: ["80:80", "443:443"], volumes: ["/home/{{ podman_user }}/containers/caddy/Caddyfile:/etc/caddy/Caddyfile:Z", "/home/{{ podman_user }}/containers/caddy/data:/data:Z"] }
+        - name: mattermost-db
+          image: "docker.io/library/postgres:{{ postgres_version }}"
+          memory: "512m"
+          env: { POSTGRES_USER: "{{ db_user }}", POSTGRES_PASSWORD: "{{ db_password }}", POSTGRES_DB: "{{ db_name }}", POSTGRES_INITDB_ARGS: "--data-checksums" }
+          volumes: ["/home/{{ podman_user }}/containers/postgres/data:/var/lib/postgresql/data:Z"]
+          healthcheck: { test: ["CMD-SHELL", "pg_isready -U {{ db_user }}"], interval: 20s }
+        
+        - name: mattermost-app
+          image: "docker.io/mattermost/mattermost-team-edition:{{ mattermost_version }}"
+          memory: "1g"
+          env: { MM_SQLSETTINGS_DRIVERNAME: "postgres", MM_SQLSETTINGS_DATASOURCE: "postgres://{{ db_user }}:{{ db_password }}@localhost:5432/{{ db_name }}?sslmode=disable&connect_timeout=10", MM_SERVICESETTINGS_SITEURL: "https://chat.{{ domain_name }}" }
+          volumes: ["/home/{{ podman_user }}/containers/mattermost/data:/mattermost/data:Z"]
+          healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:8065/api/v4/system/ping"], interval: 30s }
+          labels: { "io.containers.autoupdate": "image" }
 
-    # -------------------------------------------------------------------------
-    # 6. PERSISTENCE & AUTO-UPDATES
-    # -------------------------------------------------------------------------
-    - name: Create Runit service voor auto-start containers
-      file:
-        path: /etc/sv/podman-lch
-        state: directory
+        - name: caddy
+          image: "docker.io/caddy:{{ caddy_version }}"
+          memory: "256m"
+          volumes: ["/home/{{ podman_user }}/containers/caddy/Caddyfile:/etc/caddy/Caddyfile:z", "/home/{{ podman_user }}/containers/caddy/data:/data:z", "/home/{{ podman_user }}/containers/caddy/config:/config:z", "/home/{{ podman_user }}/containers/hugo_site:/var/www/hugo:z"]
 
-    - name: Create Runit Run Script
-      copy:
-        dest: /etc/sv/podman-lch/run
-        mode: '0755'
-        content: |
-          #!/bin/sh
-          su - {{ podman_user }} -c 'podman start --all'
-          exec pause
+    # 5. AUTONOMOUS MAINTENANCE
+    - name: Enable Final Services
+      file: { src: "/etc/sv/{{ item }}", dest: "/var/service/{{ item }}", state: link }
+      loop: [dcron, syslog-ng, fail2ban, zram-enabler, iptables-restore]
 
-    - name: Enable Runit Services
-      file:
-        src: "/etc/sv/{{ item }}"
-        dest: "/var/service/{{ item }}"
-        state: link
-      loop: [podman-lch, dbus, dcron, syslog-ng, fail2ban, zram-enabler]
-
-    - name: Setup Cronjobs
+    - name: Setup Autonomous Cronjobs
       cron:
         name: "{{ item.name }}"
         user: "{{ item.user }}"
-        minute: "0"
-        hour: "{{ item.hour }}"
+        minute: "{{ item.minute | default('0') }}"
         job: "{{ item.job }}"
       loop:
-        - { name: "System Updates", user: "root", hour: "3", job: "xbps-install -Syu -y && podman image prune -f" }
-        - { name: "Mattermost DB Backup", user: "root", hour: "2", job: "podman exec mattermost-db pg_dump -U {{ db_user }} {{ db_name }} > /home/{{ podman_user }}/backups/mm_$(date +%F).sql" }
-        - { name: "Container Auto-update", user: "{{ podman_user }}", hour: "4", job: "podman auto-update" }
+        - name: "LCH Watchdog"
+          user: "{{ podman_user }}"
+          minute: "*/5"
+          job: >
+            podman ps --format '{% raw %}{{.Names}} {{.Status}}{% endraw %}' | grep -w unhealthy | awk '{print $1}' | while read c; do
+              COUNT_FILE=/var/tmp/watchdog_$c.count;
+              COUNT=$(cat $COUNT_FILE 2>/dev/null || echo 0);
+              if [ $COUNT -lt 3 ]; then
+                if [ "$c" = "mattermost-db" ]; then podman restart mattermost-db && sleep 10 && podman restart mattermost-app; else podman restart $c; fi;
+                echo $((COUNT+1)) > $COUNT_FILE;
+                logger "WATCHDOG: Recovered $c (Attempt $((COUNT+1)))";
+              else
+                logger "CRITICAL: Watchdog failure on $c";
+                [ -n "{{ alert_webhook | default('') }}" ] && curl -X POST -H "Content-Type: application/json" -d "{\"text\":\"🚨 Watchdog gave up on $c\"}" {{ alert_webhook }};
+              fi;
+            done;
+            find /var/tmp/watchdog_*.count -mmin +60 -delete 2>/dev/null
+
+        - name: "DB Backup & Restore Test"
+          user: "{{ podman_user }}"
+          minute: "30"
+          hour: "2"
+          job: >
+            if [ $(df --output=pcent / | tail -1 | tr -dc '0-9') -lt 90 ]; then
+              BACKUP_FILE=/home/{{ podman_user }}/backups/mm_$(date +%F).sql.gz;
+              podman exec mattermost-db pg_dump -U {{ db_user }} {{ db_name }} | gzip > $BACKUP_FILE &&
+              gzip -t $BACKUP_FILE &&
+              podman exec mattermost-db bash -c "createdb -U {{ db_user }} test_restore && gunzip -c /home/{{ podman_user }}/backups/mm_$(date +%F).sql.gz | psql -U {{ db_user }} test_restore && dropdb -U {{ db_user }} test_restore" &&
+              find /home/{{ podman_user }}/backups/ -name '*.gz' -mtime +7 -delete ||
+              (logger "CRITICAL: Backup/Restore failed"; [ -n "{{ alert_webhook | default('') }}" ] && curl -X POST -d "{\"text\":\"❌ Backup failure Haarlem\"}" {{ alert_webhook }})
+            fi
+
+        - { name: "System Maintenance", user: "root", minute: "10", hour: "3", job: "(/usr/bin/xbps-install -Syu -y && podman image prune -af) || logger 'Update failed'" }
+        - { name: "Container Auto-update", user: "{{ podman_user }}", minute: "20", hour: "4", job: "podman auto-update" }
 
   handlers:
     - name: Restart SSH
