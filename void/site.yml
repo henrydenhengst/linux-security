@@ -152,3 +152,49 @@
       loop:
         - { src: '/etc/sv/podman-lch', dest: '/var/service/podman-lch' }
         - { src: '/etc/sv/dbus', dest: '/var/service/dbus' }
+
+    # -------------------------------------------------------------------------
+    # 6. FIREWALL (iptables) - Open 22, 80, 443
+    # -------------------------------------------------------------------------
+    - name: Installeer iptables
+      xbps:
+        name: iptables
+        state: present
+
+    - name: Configureer Firewall Regels (IPv4)
+      shell: |
+        iptables -F
+        iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        iptables -A INPUT -i lo -j ACCEPT
+        iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+        iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+        iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+        iptables -P INPUT DROP
+        iptables -P FORWARD DROP
+        # Sla regels op voor Void
+        iptables-save > /etc/iptables.rules
+      become: yes
+
+    # -------------------------------------------------------------------------
+    # 7. AUTO-UPDATES (Security & System)
+    # -------------------------------------------------------------------------
+    - name: Installeer cron daemon (dcron)
+      xbps:
+        name: dcron
+        state: present
+
+    - name: Activeer cron service
+      file:
+        src: /etc/sv/dcron
+        dest: /var/service/dcron
+        state: link
+
+    - name: Maak wekelijkse auto-update cronjob
+      cron:
+        name: "Security Updates"
+        user: root
+        minute: "0"
+        hour: "0"
+        weekday: "0" # Elke zondagnacht
+        job: "xbps-install -Syu -y && podman image prune -f"
+
