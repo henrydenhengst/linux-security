@@ -1,0 +1,221 @@
+---
+- name: Deploy Full LCH Stack on Alpine Linux (Podman Rootless)
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars_files:
+    - vars.yml
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # 1. ALPINE SYSTEM & SECURITY PREPARATION
+    # -------------------------------------------------------------------------
+    - name: Install Alpine System & Container Packages
+      community.general.apk:
+        name:
+          - podman
+          - podman-docker
+          - slirp4netns
+          - fuse-overlayfs
+          - shadow-uidmap
+          - awall
+          - ip6tables
+          - util-linux
+          - fail2ban
+          - python3
+          - dcron
+          - syslog-ng
+          - openssl
+          - curl
+        state: present
+        update_cache: yes
+
+    - name: Ensure podman user exists
+      user:
+        name: "{{ podman_user }}"
+        shell: /bin/sh
+        state: present
+        create_home: yes
+        uid: "{{ container_user_uid }}"
+
+    - name: Configure Rootless Mapping (subuid/subgid)
+      copy:
+        dest: "{{ item }}"
+        content: "{{ podman_user }}:100000:65536\n"
+      loop:
+        - /etc/subuid
+        - /etc/subgid
+
+    - name: Set sysctl for Rootless Privileged Ports
+      sysctl:
+        name: net.ipv4.ip_unprivileged_port_start
+        value: '80'
+        state: present
+        sysctl_file: /etc/sysctl.d/podman.conf
+
+    # -------------------------------------------------------------------------
+    # 2. DIRECTORY STRUCTURE
+    # -------------------------------------------------------------------------
+    - name: Create App Directories
+      file:
+        path: "/home/{{ podman_user }}/containers/{{ item }}"
+        state: directory
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0755'
+      loop:
+        - caddy/data
+        - caddy/config
+        - nginx/html
+        - nginx/conf.d
+        - duckdns/config
+        - rocketchat/uploads
+        - mongodb/data
+        - mongodb/backups
+        - bin
+
+    # -------------------------------------------------------------------------
+    # 3. CONFIGURATION FILES
+    # -------------------------------------------------------------------------
+    - name: Create Caddyfile
+      copy:
+        dest: "/home/{{ podman_user }}/containers/caddy/Caddyfile"
+        content: |
+          {{ domain_name }}, {{ duckdns_domain }} {
+              reverse_proxy nginx:80
+          }
+          chat.{{ domain_name }} {
+              reverse_proxy rocketchat-app:3000
+          }
+        owner: "{{ podman_user }}"
+
+    - name: Generate MongoDB Keyfile
+      shell: |
+        openssl rand -base64 756 > /home/{{ podman_user }}/containers/mongodb/keyfile
+        chmod 400 /home/{{ podman_user }}/containers/mongodb/keyfile
+        chown {{ podman_user }}:{{ podman_user }} /home/{{ podman_user }}/containers/mongodb/keyfile
+      args:
+        creates: "/home/{{ podman_user }}/containers/mongodb/keyfile"
+
+    # -------------------------------------------------------------------------
+    # 4. NETWORK & CONTAINERS
+    # -------------------------------------------------------------------------
+    - name: Create Podman Network
+      become_user: "{{ podman_user }}"
+      command: podman network exists webnet || podman network create webnet
+
+    - name: Deploy MongoDB (ReplicaSet rs0)
+      become_user: "{{ podman_user }}"
+      containers.podman.podman_container:
+        name: rocketchat-db
+        image: "docker.io/mongo:{{ mongodb_version }}"
+        state: started
+        restart_policy: unless-stopped
+        network: webnet
+        volumes:
+          - "/home/{{ podman_user }}/containers/mongodb/data:/data/db:Z"
+          - "/home/{{ podman_user }}/containers/mongodb/keyfile:/opt/keyfile:Z"
+        env:
+          MONGO_INITDB_ROOT_USERNAME: "root"
+          MONGO_INITDB_ROOT_PASSWORD: "{{ rocketchat_mongodb_password }}"
+        command: mongod --replSet rs0 --keyFile /opt/keyfile --bind_ip_all --auth
+
+    - name: Wait for MongoDB
+      pause: { seconds: 20 }
+
+    - name: Initialize MongoDB RS
+      become_user: "{{ podman_user }}"
+      command: >
+        podman exec rocketchat-db mongosh -u root -p {{ rocketchat_mongodb_password }} --quiet --eval 
+        "try { rs.status() } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'rocketchat-db:27017' }] }) }"
+      failed_when: false
+
+    - name: Deploy Rocket.Chat
+      become_user: "{{ podman_user }}"
+      containers.podman.podman_container:
+        name: rocketchat-app
+        image: "docker.io/rocketchat/rocket.chat:{{ rocketchat_version }}"
+        state: started
+        restart_policy: unless-stopped
+        network: webnet
+        env:
+          MONGO_URL: "mongodb://root:{{ rocketchat_mongodb_password }}@rocketchat-db:27017/{{ rocketchat_mongodb_database }}?replicaSet=rs0&authSource=admin"
+          MONGO_OPLOG_URL: "mongodb://root:{{ rocketchat_mongodb_password }}@rocketchat-db:27017/local?replicaSet=rs0&authSource=admin"
+          ROOT_URL: "https://chat.{{ domain_name }}"
+
+    - name: Deploy Web Services
+      become_user: "{{ podman_user }}"
+      containers.podman.podman_container:
+        name: "{{ item.name }}"
+        image: "{{ item.image }}"
+        state: started
+        restart_policy: unless-stopped
+        network: webnet
+        ports: "{{ item.ports | default(omit) }}"
+        env: "{{ item.env | default(omit) }}"
+        volumes: "{{ item.volumes | default(omit) }}"
+      loop:
+        - { name: 'duckdns', image: "lscr.io/linuxserver/duckdns:{{ duckdns_version }}", env: { SUBDOMAINS: "{{ duckdns_subdomain }}", TOKEN: "{{ duckdns_token }}", UPDATE_IP: "{{ duckdns_update_ip }}" } }
+        - { name: 'nginx', image: "docker.io/nginx:{{ nginx_version }}", volumes: ["/home/{{ podman_user }}/containers/nginx/html:/usr/share/nginx/html:Z"] }
+        - { name: 'caddy', image: "docker.io/caddy:{{ caddy_version }}", ports: ["80:80", "443:443"], volumes: ["/home/{{ podman_user }}/containers/caddy/Caddyfile:/etc/caddy/Caddyfile:Z", "/home/{{ podman_user }}/containers/caddy/data:/data:Z", "/home/{{ podman_user }}/containers/caddy/config:/config:Z"] }
+
+    # -------------------------------------------------------------------------
+    # 5. FIREWALL (AWALL) & FAIL2BAN
+    # -------------------------------------------------------------------------
+    - name: Setup Awall Rules
+      copy:
+        dest: /etc/awall/optional/lch-stack.json
+        content: |
+          {
+            "description": "LCH Web Stack",
+            "filter": [
+              { "in": "internet", "out": "_fw", "service": ["ssh", "http", "https"], "action": "accept" }
+            ]
+          }
+
+    - name: Activate Firewall
+      shell: "awall enable lch-stack && awall activate"
+
+    - name: Configure Fail2ban for Alpine
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [sshd]
+          enabled = true
+          port = ssh
+          filter = sshd
+          logpath = /var/log/messages
+          maxretry = 5
+          bantime = 1h
+
+    # -------------------------------------------------------------------------
+    # 6. PERSISTENCE & AUTO-UPDATES
+    # -------------------------------------------------------------------------
+    - name: Enable Persistence (OpenRC Start script)
+      copy:
+        dest: /etc/local.d/podman.start
+        content: |
+          #!/bin/sh
+          # Wacht tot netwerk up is
+          sleep 5
+          su - {{ podman_user }} -c 'podman start --all'
+        mode: '0755'
+
+    - name: Schedule Auto-Updates & Backups
+      cron:
+        name: "{{ item.name }}"
+        user: "{{ item.user }}"
+        hour: "{{ item.hour }}"
+        minute: "0"
+        job: "{{ item.job }}"
+      loop:
+        - { name: 'System Update', user: 'root', hour: '3', job: 'apk update && apk upgrade' }
+        - { name: 'Podman Cleanup', user: 'root', hour: '4', job: 'podman system prune -f' }
+
+    - name: Start Systeem Services (OpenRC)
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop: [syslog-ng, fail2ban, dcron, local]
