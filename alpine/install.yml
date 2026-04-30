@@ -1,5 +1,5 @@
 ---
-- name: Deploy Full LCH Stack on Alpine Linux (Podman Rootless)
+- name: Deploy Full LCH Stack on Alpine Linux
   hosts: all
   become: yes
   gather_facts: yes
