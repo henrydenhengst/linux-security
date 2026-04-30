@@ -1,6 +1,6 @@
 ---
 - name: Deploy Full LCH Stack on Void Linux (Mattermost)
-  hosts: all
+  hosts: localhost
   become: yes
   gather_facts: yes
 
