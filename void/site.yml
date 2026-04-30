@@ -20,7 +20,7 @@
           - git
           - python3
           - dbus
-          - sudo       # Omdat je aangaf sudo te willen gebruiken ipv doas
+          - sudo
           - ip6tables
         state: present
         update: yes
