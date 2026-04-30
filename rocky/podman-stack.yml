@@ -1,38 +1,71 @@
 ---
-- name: Install and Harden Podman Stack with Cockpit on Rocky Linux
+- name: Full Deploy and Harden Podman Stack with Cockpit and Rocket.Chat
   hosts: localhost
   become: yes
+  gather_facts: yes
 
-  vars:
-    podman_user: poduser
-    subuid_range: "100000:65536"
-    registries:
-      - "docker.io"
-      - "quay.io"
+  vars_files:
+    - vars.yml
 
   tasks:
     # -------------------------------------------------------------------------
-    # 1. INSTALL PACKAGES
+    # 1. INSTALLATIE BASIS PAKKETTEN
     # -------------------------------------------------------------------------
-    - name: Install Podman, Cockpit, and supporting tools
+    - name: Install Podman, Cockpit, and Security tools
       dnf:
         name:
           - podman
-          - buildah
-          - skopeo
-          - podman-docker
-          - fuse-overlayfs
-          - slirp4netns
           - cockpit
           - cockpit-podman
           - firewalld
           - auditd
           - fail2ban
           - dnf-automatic
+          - fuse-overlayfs
+          - slirp4netns
         state: present
 
     # -------------------------------------------------------------------------
-    # 2. CREATE ROOTLESS USER & LINGER
+    # 2. HARDWARE OPTIMALISATIE (ZSWAP & SSD)
+    # -------------------------------------------------------------------------
+    - name: Configure zswap for memory compression (Ideal for 8GB RAM)
+      copy:
+        dest: /etc/default/grub
+        content: |
+          GRUB_TIMEOUT=5
+          GRUB_DISTRIBUTOR="$(sed 's, release .*$,,g' /etc/system-release)"
+          GRUB_DEFAULT=saved
+          GRUB_DISABLE_SUBMENU=true
+          GRUB_TERMINAL_OUTPUT="console"
+          # Activeert zswap met lzo (lichte CPU belasting) en limiteert pool tot 25% van RAM
+          GRUB_CMDLINE_LINUX="rhgb quiet zswap.enabled=1 zswap.compressor=lzo zswap.max_pool_percent=25"
+          GRUB_DISABLE_RECOVERY="true"
+      register: grub_config
+
+    - name: Update GRUB config
+      command: grub2-mkconfig -o /boot/grub2/grub.cfg
+      when: grub_config.changed
+      notify: Update initramfs
+
+    - name: SSD and Swappiness tuning
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        sys_file: /etc/sysctl.d/99-hardware-tuning.conf
+      loop:
+        - { name: 'vm.swappiness', value: '60' }
+        - { name: 'vm.vfs_cache_pressure', value: '100' }
+        - { name: 'net.ipv4.ip_forward', value: '1' }
+
+    - name: Enable periodic SSD TRIM
+      systemd:
+        name: fstrim.timer
+        enabled: yes
+        state: started
+
+    # -------------------------------------------------------------------------
+    # 3. ROOTLESS USER & DIRECTORIES
     # -------------------------------------------------------------------------
     - name: Create container user
       user:
@@ -40,483 +73,147 @@
         shell: /bin/bash
         create_home: yes
 
-    - name: Configure subuid and subgid
-      lineinfile:
-        path: "/etc/{{ item }}"
-        line: "{{ podman_user }}:{{ subuid_range }}"
-        create: yes
-      loop:
-        - subuid
-        - subgid
-
-    - name: Enable lingering for user (allows containers to run without active session)
+    - name: Enable lingering for rootless containers
       command: "loginctl enable-linger {{ podman_user }}"
       args:
         creates: "/var/lib/systemd/linger/{{ podman_user }}"
 
-    # -------------------------------------------------------------------------
-    # 3. CONTAINER STORAGE & REGISTRY CONFIG
-    # -------------------------------------------------------------------------
-    - name: Configure containers storage
-      copy:
-        dest: /etc/containers/storage.conf
-        content: |
-          [storage]
-          driver = "overlay"
-          runroot = "/run/containers/storage"
-          graphroot = "/var/lib/containers/storage"
-
-          [storage.options]
-          mount_program = "/usr/bin/fuse-overlayfs"
-          mountopt = "nodev,noexec,nosuid"
-
-    - name: Configure container registries
-      copy:
-        dest: /etc/containers/registries.conf
-        content: |
-          unqualified-search-registries = [
-            "docker.io",
-            "quay.io"
-          ]
-
-          [[registry]]
-          prefix = "docker.io"
-          location = "docker.io"
-
-          [[registry.mirror]]
-          location = "mirror.docker.io"
-
-    - name: Set container image policy (Secure)
-      copy:
-        dest: /etc/containers/policy.json
-        content: |
-          {
-            "default": [
-              {
-                "type": "reject"
-              }
-            ],
-            "transports": {
-              "docker": {
-                "docker.io": [
-                  {
-                    "type": "signedBy",
-                    "keyType": "GPGKeys",
-                    "keyPath": "/etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release"
-                  }
-                ],
-                "quay.io": [
-                  {
-                    "type": "signedBy",
-                    "keyType": "GPGKeys",
-                    "keyPath": "/etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release"
-                  }
-                ]
-              }
-            }
-          }
-
-    - name: Set global containers.conf with security hardening
-      copy:
-        dest: /etc/containers/containers.conf
-        content: |
-          [containers]
-          log_driver = "journald"
-          log_size_max = 52428800
-          seccomp = true
-          cgroups = "enabled"
-          default_capabilities = [
-            "CHOWN",
-            "DAC_OVERRIDE",
-            "FOWNER",
-            "FSETID",
-            "KILL",
-            "NET_RAW",
-            "SETGID",
-            "SETUID",
-            "SETPCAP",
-            "NET_BIND_SERVICE"
-          ]
-          drop_capabilities = [
-            "AUDIT_WRITE",
-            "SYS_ADMIN",
-            "SYS_PTRACE",
-            "SYS_RAWIO",
-            "SYS_CHROOT",
-            "MKNOD",
-            "SETFCAP"
-          ]
-
-          [network]
-          network_backend = "netavark"
-
-          [engine]
-          cgroup_manager = "systemd"
-          events_logger = "journald"
-
-    - name: Disable container SSH access by default
-      copy:
-        dest: /etc/containers/containers.conf.d/ssh-block.conf
-        content: |
-          [containers]
-          ssh = "none"
-
-    # -------------------------------------------------------------------------
-    # 4. DISABLE PODMAN REST API SOCKET (SECURITY)
-    # -------------------------------------------------------------------------
-    - name: Disable Podman REST API socket
-      systemd:
-        name: "{{ item }}"
-        enabled: no
-        state: stopped
-        masked: yes
-      loop:
-        - io.podman.socket
-        - podman.socket
-      failed_when: false
-      register: socket_disable_result
-
-    - name: Display socket disable status
-      debug:
-        msg: "Podman sockets disabled (if they existed)"
-      when: not socket_disable_result.failed
-
-    # -------------------------------------------------------------------------
-    # 5. KERNEL MODULE RESTRICTIONS (SECURITY)
-    # -------------------------------------------------------------------------
-    - name: Restrict kernel modules for containers
-      copy:
-        dest: /etc/modprobe.d/container-blacklist.conf
-        content: |
-          # Block container access to sensitive kernel modules
-          blacklist sctp
-          blacklist dccp
-          blacklist rds
-          blacklist tipc
-          blacklist hsr
-          blacklist vsock
-          install cramfs /bin/false
-          install freevxfs /bin/false
-          install jffs2 /bin/false
-          install hfs /bin/false
-          install hfsplus /bin/false
-          install squashfs /bin/false
-          install udf /bin/false
-      notify: Update initramfs
-
-    # -------------------------------------------------------------------------
-    # 6. USER NAMESPACE REMAPPING FOR ROOTLESS CONTAINERS
-    # -------------------------------------------------------------------------
-    - name: Configure rootless user namespace remapping
-      copy:
-        dest: "/home/{{ podman_user }}/.config/containers/libpod.conf"
-        content: |
-          [containers]
-          # Explicitly enable user namespaces for better isolation
-          userns = "auto"
-          # Size of the user namespace
-          userns_size = 65536
+    - name: Create required directories
+      file:
+        path: "/home/{{ podman_user }}/containers/{{ item }}"
+        state: directory
         owner: "{{ podman_user }}"
         group: "{{ podman_user }}"
-        mode: '0644'
+        mode: '0755'
+      loop:
+        - rocketchat/uploads
+        - mongodb/data
+        - mongodb/backups
+        - caddy
+        - bin
 
     # -------------------------------------------------------------------------
-    # 7. COCKPIT CONFIGURATION & HARDENING
+    # 4. MONGODB 4.4 DEPLOYMENT (No-AVX compatible)
     # -------------------------------------------------------------------------
-    - name: Enable Cockpit socket
-      systemd:
-        name: cockpit.socket
+    - name: Generate MongoDB keyfile
+      copy:
+        dest: "/home/{{ podman_user }}/containers/mongodb/keyfile"
+        content: "{{ lookup('password', '/dev/null length=756 chars=ascii_letters,digits') }}"
+        owner: "{{ podman_user }}"
+        group: "{{ podman_user }}"
+        mode: '0400'
+
+    - name: Deploy MongoDB 4.4
+      become_user: "{{ podman_user }}"
+      containers.podman.podman_container:
+        name: rocketchat-db
+        image: "docker.io/library/mongo:4.4"
+        state: started
+        restart_policy: unless-stopped
+        volumes:
+          - "/home/{{ podman_user }}/containers/mongodb/data:/data/db:Z"
+          - "/home/{{ podman_user }}/containers/mongodb/keyfile:/opt/keyfile:Z"
+        env:
+          MONGO_INITDB_ROOT_USERNAME: "root"
+          MONGO_INITDB_ROOT_PASSWORD: "{{ rocketchat_mongodb_password }}"
+        command: >
+          mongod --replSet rs0
+          --keyFile /opt/keyfile
+          --bind_ip_all
+          --auth
+          --wiredTigerCacheSizeGB 1.5
+        network: webnet
+
+    - name: Initialize MongoDB ReplicaSet
+      become_user: "{{ podman_user }}"
+      command: >
+        podman exec rocketchat-db mongo --quiet
+        -u root -p {{ rocketchat_mongodb_password }} --authenticationDatabase admin
+        --eval "rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'rocketchat-db:27017' }] })"
+      register: rs_init
+      until: rs_init.rc == 0
+      retries: 5
+      delay: 10
+      failed_when: false
+
+    # -------------------------------------------------------------------------
+    # 5. ROCKET.CHAT DEPLOYMENT
+    # -------------------------------------------------------------------------
+    - name: Deploy Rocket.Chat
+      become_user: "{{ podman_user }}"
+      containers.podman.podman_container:
+        name: rocketchat-app
+        image: "docker.io/rocketchat/rocket.chat:{{ rocketchat_version | default('latest') }}"
+        state: started
+        restart_policy: unless-stopped
+        resource_limits:
+          memory: 2G
+        env:
+          MONGO_URL: "mongodb://root:{{ rocketchat_mongodb_password }}@rocketchat-db:27017/rocketchat?replicaSet=rs0&authSource=admin"
+          MONGO_OPLOG_URL: "mongodb://root:{{ rocketchat_mongodb_password }}@rocketchat-db:27017/local?replicaSet=rs0&authSource=admin"
+          ROOT_URL: "https://chat.{{ domain_name }}"
+          NODE_OPTIONS: "--max-old-space-size=1536"
+        network: webnet
+
+    # -------------------------------------------------------------------------
+    # 6. SECURITY & COCKPIT
+    # -------------------------------------------------------------------------
+    - name: Enable Cockpit and Firewalld
+      service:
+        name: "{{ item }}"
         enabled: yes
         state: started
+      loop:
+        - cockpit.socket
+        - firewalld
+        - fail2ban
 
-    - name: Harden Cockpit session settings
-      copy:
-        dest: /etc/cockpit/cockpit.conf
-        content: |
-          [WebService]
-          IdleTimeout=15
-          MaxStartups=3
-          AllowUnencrypted=false
-          ProtocolHeader=x-forwarded-proto
-          
-          [Session]
-          IdleTimeout=15
+    - name: Firewall rules
+      firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop:
+        - cockpit
+        - http
+        - https
 
-    # -------------------------------------------------------------------------
-    # 8. FAIL2BAN FOR COCKPIT PROTECTION
-    # -------------------------------------------------------------------------
-    - name: Configure fail2ban for Cockpit
+    - name: Configure Fail2Ban for Cockpit
       copy:
         dest: /etc/fail2ban/jail.d/cockpit.local
         content: |
           [cockpit]
           enabled = true
           port = 9090
-          filter = cockpit
-          logpath = /var/log/messages
           maxretry = 3
           bantime = 3600
       notify: Restart fail2ban
 
-    - name: Ensure fail2ban is running
-      service:
-        name: fail2ban
-        enabled: yes
-        state: started
-
     # -------------------------------------------------------------------------
-    # 9. USER RESOURCE LIMITS
+    # 7. AUTOMATIC UPDATES
     # -------------------------------------------------------------------------
-    - name: Increase limits for podman user
-      copy:
-        dest: "/etc/security/limits.d/{{ podman_user }}.conf"
-        content: |
-          {{ podman_user }} soft nofile 65535
-          {{ podman_user }} hard nofile 65535
-          {{ podman_user }} soft nproc 65535
-          {{ podman_user }} hard nproc 65535
-
-    # -------------------------------------------------------------------------
-    # 10. SECURITY & NETWORKING
-    # -------------------------------------------------------------------------
-    - name: Ensure SELinux is enforcing
-      selinux:
-        policy: targeted
-        state: enforcing
-
-    - name: Start and enable firewalld
-      service:
-        name: firewalld
-        enabled: yes
-        state: started
-
-    - name: Allow Cockpit through firewalld
-      firewalld:
-        service: cockpit
-        permanent: yes
-        state: enabled
-        immediate: yes
-
-    - name: Apply sysctl tuning for container networking
-      copy:
-        dest: /etc/sysctl.d/99-containers.conf
-        content: |
-          net.ipv4.ip_forward=1
-          net.ipv4.conf.all.rp_filter=1
-          net.ipv4.tcp_syncookies=1
-          net.bridge.bridge-nf-call-iptables=1
-          net.bridge.bridge-nf-call-ip6tables=1
-      notify: Reload sysctl
-
-    - name: Ensure sysctl settings persist after reboot
-      systemd:
-        name: systemd-sysctl
-        enabled: yes
-        state: started
-
-    - name: Set restrictive umask for podman user
-      lineinfile:
-        path: "/home/{{ podman_user }}/.bashrc"
-        line: "umask 027"
-        create: yes
-
-    - name: Configure audit logging for containers
-      copy:
-        dest: /etc/audit/rules.d/99-container-audit.rules
-        content: |
-          -w /usr/bin/podman -p x -k podman-execution
-          -w /etc/containers/ -p wa -k container-config
-          -w /usr/bin/buildah -p x -k buildah-execution
-          -w /usr/bin/skopeo -p x -k skopeo-execution
-      notify: Restart auditd
-
-    - name: Create user config directory
-      file:
-        path: "/home/{{ podman_user }}/.config/containers"
-        state: directory
-        owner: "{{ podman_user }}"
-        group: "{{ podman_user }}"
-        mode: '0755'
-
-    - name: Limit container log sizes for user
-      copy:
-        dest: "/home/{{ podman_user }}/.config/containers/containers.conf"
-        content: |
-          [containers]
-          log_size_max = 10485760
-          log_file = ""
-        owner: "{{ podman_user }}"
-        group: "{{ podman_user }}"
-        mode: '0644'
-
-    # -------------------------------------------------------------------------
-    # 11. AUTOMATIC SECURITY UPDATES (DNF AUTOMATIC)
-    # -------------------------------------------------------------------------
-    - name: Configure dnf-automatic for security updates only
+    - name: Configure Security Auto-updates
       copy:
         dest: /etc/dnf/automatic.conf
         content: |
           [commands]
-          # Security updates only (not all package updates)
           upgrade_type = security
-          # Random delay to avoid thundering herd
-          random_sleep = 240
-          # Download updates but don't apply (let timer handle it)
           download_updates = yes
           apply_updates = yes
-          
-          [email]
-          # Send email to root on changes
           emit_via = stdio
-          email_from = root@localhost
-          email_to = root
-          
-          [base]
-          debuglevel = 1
-          
-          [updates]
-          # Also update container-related packages
-          include_pkgs = podman,buildah,skopeo,cockpit,firewalld,kernel*
-          
-          [command]
-          # Don't reboot automatically
-          reboot = never
-      notify: Enable dnf-automatic timer
-
-    - name: Ensure dnf-automatic timer is enabled and running
-      systemd:
-        name: dnf-automatic.timer
-        enabled: yes
-        state: started
-
-    - name: Verify dnf-automatic timer status
-      command: systemctl status dnf-automatic.timer --no-pager
-      register: timer_status
-      changed_when: false
-
-    - name: Display timer status
-      debug:
-        msg: "{{ timer_status.stdout_lines }}"
-
-    # -------------------------------------------------------------------------
-    # 12. AUTO-CLEANUP (WEEKLY PRUNE)
-    # -------------------------------------------------------------------------
-    - name: Schedule weekly container prune
-      cron:
-        name: "Podman system prune"
-        user: "{{ podman_user }}"
-        minute: "0"
-        hour: "2"
-        weekday: "0"
-        job: "/usr/bin/podman system prune -f"
-
-    - name: Schedule daily log cleanup
-      cron:
-        name: "Podman log cleanup"
-        user: "{{ podman_user }}"
-        minute: "30"
-        hour: "3"
-        day: "*"
-        job: "/usr/bin/podman system prune --volumes -f"
-
-    # -------------------------------------------------------------------------
-    # 13. VERIFICATION
-    # -------------------------------------------------------------------------
-    - name: Test podman rootless info
-      become_user: "{{ podman_user }}"
-      command: podman info
-      register: podman_test
-      changed_when: false
-      failed_when: false
-
-    - name: Print podman info status
-      debug:
-        msg: "Podman is correctly configured for rootless user: {{ podman_user }}"
-      when: podman_test.rc == 0
-
-    - name: Warn if podman test failed
-      debug:
-        msg: "WARNING: Podman test failed for user {{ podman_user }}. Check logs."
-      when: podman_test.rc != 0
-
-    - name: Test rootless container execution
-      become_user: "{{ podman_user }}"
-      command: podman run --rm docker.io/alpine echo "Container test successful"
-      register: container_test
-      changed_when: false
-      failed_when: false
-
-    - name: Display container test result
-      debug:
-        msg: "{{ container_test.stdout }}"
-      when: container_test.rc == 0
-
-    # -------------------------------------------------------------------------
-    # 14. FINAL SUMMARY
-    # -------------------------------------------------------------------------
-    - name: Display deployment summary
-      debug:
-        msg: |
-          ╔══════════════════════════════════════════════════════════════════╗
-          ║           ✅ PODMAN STACK DEPLOYMENT COMPLETE!                   ║
-          ╚══════════════════════════════════════════════════════════════════╝
-          
-          🔐 SECURITY FEATURES ENABLED:
-          ───────────────────────────────────────────────────────────────────
-          • Rootless Podman user ({{ podman_user }})
-          • SELinux enforcing mode
-          • Firewalld with Cockpit access
-          • Fail2ban protecting Cockpit (3 attempts → 1 hour ban)
-          • Kernel module restrictions (blacklisted)
-          • Podman REST API disabled
-          • User namespace remapping (userns=auto)
-          • Dropped dangerous container capabilities
-          • Audit logging for container commands
-          
-          🔄 AUTOMATIC UPDATES:
-          ───────────────────────────────────────────────────────────────────
-          • Security updates only (dnf-automatic)
-          • Runs daily via systemd timer
-          • Podman, Cockpit, kernel security patches included
-          • Weekly container prune (Sundays at 2 AM)
-          • Daily orphan cleanup (3:30 AM)
-          
-          🚀 GETTING STARTED:
-          ───────────────────────────────────────────────────────────────────
-          • Cockpit UI: https://YOUR_SERVER_IP:9090
-          • Login with: {{ podman_user }} and password
-          • Test Podman: sudo -u {{ podman_user }} podman info
-          
-          📋 MANAGEMENT COMMANDS:
-          ───────────────────────────────────────────────────────────────────
-          • Check auto-updates: systemctl status dnf-automatic.timer
-          • Force security update: dnf-automatic --security
-          • Test container: podman run hello-world
-          
-          ╔══════════════════════════════════════════════════════════════════╗
-          ║         Your hardened Podman server is ready for action!        ║
-          ╚══════════════════════════════════════════════════════════════════╝
-
-  handlers:
-    - name: Reload sysctl
-      command: sysctl --system
-
-    - name: Restart auditd
-      service:
-        name: auditd
-        state: restarted
-
-    - name: Restart fail2ban
-      service:
-        name: fail2ban
-        state: restarted
-
-    - name: Update initramfs
-      command: dracut -f
-
+    
     - name: Enable dnf-automatic timer
       systemd:
         name: dnf-automatic.timer
         enabled: yes
         state: started
-        daemon_reload: yes
+
+  handlers:
+    - name: Update initramfs
+      command: dracut -f
+
+    - name: Restart fail2ban
+      service:
+        name: fail2ban
+        state: restarted
