@@ -1,0 +1,59 @@
+---
+- name: Configureer Alpine Linux met Podman en Security
+  hosts: all
+  become: yes
+  tasks:
+    - name: Update de pakketindex
+      community.general.apk:
+        update_cache: yes
+
+    - name: Installeer Podman, Buildah en Skopeo
+      community.general.apk:
+        name:
+          - podman
+          - buildah
+          - skopeo
+          - slirp4netns
+          - fuse-overlayfs
+        state: present
+
+    - name: Zorg dat de tun module geladen wordt (voor rootless networking)
+      community.general.modprobe:
+        name: tun
+        state: present
+
+    - name: Installeer en configureer de firewall (awall)
+      community.general.apk:
+        name: awall
+        state: present
+
+    - name: Maak firewall configuratie voor SSH, HTTP en HTTPS
+      copy:
+        dest: /etc/awall/optional/webserver.json
+        content: |
+          {
+            "description": "Sta SSH en Webverkeer toe",
+            "filter": [
+              { "in": "internet", "out": "_fw", "service": ["ssh", "http", "https"], "action": "accept" }
+            ]
+          }
+
+    - name: Activeer de firewall policies
+      command: awall enable webserver
+      
+    - name: Pas firewall wijzigingen toe
+      command: awall activate
+      
+    - name: Zorg dat SSH service draait
+      service:
+        name: sshd
+        state: started
+        enabled: yes
+
+    - name: Configureer subuid/subgid voor rootless Podman
+      copy:
+        dest: "{{ item }}"
+        content: "alpine:100000:65536\n"
+      loop:
+        - /etc/subuid
+        - /etc/subgid
