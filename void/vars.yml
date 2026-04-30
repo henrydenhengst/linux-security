@@ -56,3 +56,16 @@ open_ports:
 # ============================================
 # Map waar je Hugo 'public' files komen te staan
 hugo_site_path: "/home/{{ podman_user }}/containers/nginx/html"
+
+###
+podman_user: "poduser"
+container_user_uid: 1001
+domain_name: "jouwdomein.nl"
+admin_email: "admin@{{ domain_name }}"
+postgres_version: "16-alpine"
+mattermost_version: "9.5"
+caddy_version: "2.7-alpine"
+db_user: "mmuser"
+db_name: "mattermost"
+db_password: "CHANGEME_SECURE_PASSWORD"
+# alert_webhook: "https://discord.com/api/webhooks/..." # Verwijder het hekje om meldingen te activeren
