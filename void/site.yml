@@ -4,15 +4,14 @@
   become: yes
   gather_facts: yes
 
-  # Hier koppelen we je vars.yml bestand
   vars_files:
     - vars.yml
 
   tasks:
     # -------------------------------------------------------------------------
-    # 1. VOID SYSTEM PREPARATION
+    # 1. VOID SYSTEM & REPO PREPARATION
     # -------------------------------------------------------------------------
-    - name: Install Void System Packages
+    - name: Install Core System Packages
       xbps:
         name:
           - podman
@@ -22,6 +21,11 @@
           - dbus
           - sudo
           - ip6tables
+          - iptables
+          - dcron
+          - syslog-ng
+          - fail2ban
+          - zram-enabler
         state: present
         update: yes
 
@@ -61,7 +65,53 @@
         - postgres/data
 
     # -------------------------------------------------------------------------
-    # 3. CONFIGURATION FILES
+    # 3. SECURITY: FIREWALL & SSH HARDENING
+    # -------------------------------------------------------------------------
+    - name: Configure Firewall Rules (IPv4)
+      shell: |
+        iptables -F
+        iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        iptables -A INPUT -i lo -j ACCEPT
+        iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+        iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+        iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+        iptables -P INPUT DROP
+        iptables -P FORWARD DROP
+        iptables-save > /etc/iptables.rules
+
+    - name: Ensure Firewall persists after reboot
+      copy:
+        dest: /etc/rc.local
+        content: |
+          #!/bin/sh
+          iptables-restore < /etc/iptables.rules
+          exit 0
+        mode: '0755'
+
+    - name: SSH Hardening - Disable Passwords
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin no' }
+        - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
+      notify: Restart SSH
+
+    - name: Configure Fail2ban Jail
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [sshd]
+          enabled = true
+          filter = sshd
+          port = 22
+          logpath = /var/log/messages
+          maxretry = 3
+          bantime = 1d
+
+    # -------------------------------------------------------------------------
+    # 4. CONFIGURATION FILES
     # -------------------------------------------------------------------------
     - name: Create Caddyfile
       copy:
@@ -76,7 +126,7 @@
         owner: "{{ podman_user }}"
 
     # -------------------------------------------------------------------------
-    # 4. NETWORK & CONTAINERS (Postgres + Mattermost)
+    # 5. NETWORK & CONTAINERS
     # -------------------------------------------------------------------------
     - name: Create Podman Network
       become_user: "{{ podman_user }}"
@@ -112,6 +162,8 @@
         volumes:
           - "/home/{{ podman_user }}/containers/mattermost/data:/mattermost/data:Z"
           - "/home/{{ podman_user }}/containers/mattermost/logs:/mattermost/logs:Z"
+        labels:
+          io.containers.autoupdate: "image"
 
     - name: Deploy Web Proxy (Caddy & Nginx)
       become_user: "{{ podman_user }}"
@@ -128,9 +180,9 @@
         - { name: 'caddy', image: "docker.io/caddy:{{ caddy_version }}", ports: ["80:80", "443:443"], volumes: ["/home/{{ podman_user }}/containers/caddy/Caddyfile:/etc/caddy/Caddyfile:Z", "/home/{{ podman_user }}/containers/caddy/data:/data:Z"] }
 
     # -------------------------------------------------------------------------
-    # 5. VOID PERSISTENCE (Runit Service)
+    # 6. PERSISTENCE & AUTO-UPDATES
     # -------------------------------------------------------------------------
-    - name: Create Runit service voor auto-start
+    - name: Create Runit service voor auto-start containers
       file:
         path: /etc/sv/podman-lch
         state: directory
@@ -146,55 +198,28 @@
 
     - name: Enable Runit Services
       file:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
+        src: "/etc/sv/{{ item }}"
+        dest: "/var/service/{{ item }}"
         state: link
       loop:
-        - { src: '/etc/sv/podman-lch', dest: '/var/service/podman-lch' }
-        - { src: '/etc/sv/dbus', dest: '/var/service/dbus' }
+        - podman-lch
+        - dbus
+        - dcron
+        - syslog-ng
+        - fail2ban
+        - zram-enabler
 
-    # -------------------------------------------------------------------------
-    # 6. FIREWALL (iptables) - Open 22, 80, 443
-    # -------------------------------------------------------------------------
-    - name: Installeer iptables
-      xbps:
-        name: iptables
-        state: present
-
-    - name: Configureer Firewall Regels (IPv4)
-      shell: |
-        iptables -F
-        iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-        iptables -A INPUT -i lo -j ACCEPT
-        iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-        iptables -A INPUT -p tcp --dport 80 -j ACCEPT
-        iptables -A INPUT -p tcp --dport 443 -j ACCEPT
-        iptables -P INPUT DROP
-        iptables -P FORWARD DROP
-        # Sla regels op voor Void
-        iptables-save > /etc/iptables.rules
-      become: yes
-
-    # -------------------------------------------------------------------------
-    # 7. AUTO-UPDATES (Security & System)
-    # -------------------------------------------------------------------------
-    - name: Installeer cron daemon (dcron)
-      xbps:
-        name: dcron
-        state: present
-
-    - name: Activeer cron service
-      file:
-        src: /etc/sv/dcron
-        dest: /var/service/dcron
-        state: link
-
-    - name: Maak wekelijkse auto-update cronjob
+    - name: Setup Cronjobs (System Update & Container Update)
       cron:
-        name: "Security Updates"
-        user: root
+        name: "{{ item.name }}"
+        user: "{{ item.user }}"
         minute: "0"
-        hour: "0"
-        weekday: "0" # Elke zondagnacht
-        job: "xbps-install -Syu -y && podman image prune -f"
+        hour: "{{ item.hour }}"
+        job: "{{ item.job }}"
+      loop:
+        - { name: "System Security Updates", user: "root", hour: "3", job: "xbps-install -Syu -y && podman image prune -f" }
+        - { name: "Container Auto-update", user: "{{ podman_user }}", hour: "4", job: "podman auto-update" }
 
+  handlers:
+    - name: Restart SSH
+      shell: "sv restart sshd"
