@@ -1,71 +1,46 @@
+---
 # ============================================
-# DUCKDNS CONFIGURATION
+# DUCKDNS & DOMAIN CONFIGURATION
 # ============================================
 duckdns_subdomain: "linuxcafehaarlem"
-duckdns_token: "YOUR_TOKEN_HERE"
+duckdns_token: "YOUR_TOKEN_HERE" # Vervang door je echte token
 duckdns_update_ip: "ipv4"
 
-# ============================================
-# DOMAIN & NETWORK
-# ============================================
 custom_domain: "linuxcafehaarlem.nl"
-duckdns_domain: "{{ duckdns_subdomain }}.duckdns.org"
+# De site.yml gebruikt 'domain_name' voor Caddy en Mattermost
 domain_name: "{{ custom_domain }}"
+admin_email: "vcp5693@duck.com"
 timezone: "Europe/Amsterdam"
 
 # ============================================
 # USER CONFIGURATION
 # ============================================
 podman_user: "poduser"
-container_user_uid: 1000
-# Void gebruikt vaak geen specifieke gid in de user module tenzij gevraagd
-container_user_gid: 1000 
+container_user_uid: 1001
+container_user_gid: 1001
 
 # ============================================
-# CONTAINER VERSIONS (Geoptimaliseerd voor Void/Oude hardware)
+# CONTAINER VERSIONS (Lichtgewicht voor oude hardware)
 # ============================================
-caddy_version: "alpine"       # Alpine is lichter dan 'latest'
-nginx_version: "alpine"
-duckdns_version: "latest"
-mattermost_version: "latest"  # Mattermost i.p.v. Rocket.Chat
-postgres_version: "16-alpine" # PostgreSQL i.p.v. MongoDB (GEEN AVX NODIG!)
+caddy_version: "2.7-alpine"
+postgres_version: "16-alpine"
+mattermost_version: "9.5"
 
 # ============================================
-# MATTERMOST CONFIGURATION
+# MATTERMOST & DATABASE CONFIGURATION
 # ============================================
-mattermost_port: 8065
 db_user: "mmuser"
-db_password: "KiesHierEenSterkWachtwoord123!"
 db_name: "mattermost"
-
-# Admin info (voor je eigen administratie)
-admin_email: "vcp5693@duck.com"
+db_password: "KiesHierEenSterkWachtwoord123!" # Zorg dat dit uniek is
 
 # ============================================
-# SECURITY & SYSTEM
+# SECURITY & WEBHOOKS
 # ============================================
-# Void heeft geen SELinux, we zetten dit op false om fouten te voorkomen
-selinux_enabled: false
+# Verwijder het hekje hieronder om Discord/Slack meldingen te activeren
+# alert_webhook: "https://discord.com/api/webhooks/..."
+
+# Poorten die open moeten in de firewall
 open_ports:
   - 80
   - 443
   - 22
-
-# ============================================
-# HUGO / NGINX SETTINGS
-# ============================================
-# Map waar je Hugo 'public' files komen te staan
-hugo_site_path: "/home/{{ podman_user }}/containers/nginx/html"
-
-###
-podman_user: "poduser"
-container_user_uid: 1001
-domain_name: "jouwdomein.nl"
-admin_email: "admin@{{ domain_name }}"
-postgres_version: "16-alpine"
-mattermost_version: "9.5"
-caddy_version: "2.7-alpine"
-db_user: "mmuser"
-db_name: "mattermost"
-db_password: "CHANGEME_SECURE_PASSWORD"
-# alert_webhook: "https://discord.com/api/webhooks/..." # Verwijder het hekje om meldingen te activeren
