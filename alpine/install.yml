@@ -158,7 +158,7 @@
       loop:
         - { name: 'duckdns', image: "lscr.io/linuxserver/duckdns:{{ duckdns_version }}", env: { SUBDOMAINS: "{{ duckdns_subdomain }}", TOKEN: "{{ duckdns_token }}", UPDATE_IP: "{{ duckdns_update_ip }}" } }
         - { name: 'nginx', image: "docker.io/nginx:{{ nginx_version }}", volumes: ["/home/{{ podman_user }}/containers/nginx/html:/usr/share/nginx/html:Z"] }
-        - { name: 'caddy', image: "docker.io/caddy:{{ caddy_version }}", ports: ["80:80", "443:443"], volumes: ["/home/{{ podman_user }}/containers/caddy/Caddyfile:/etc/caddy/Caddyfile:Z", "/home/{{ podman_user }}/containers/caddy/data:/data:Z", "/home/{{ podman_user }}/containers/caddy/config:/config:Z"] }
+        - { name: 'caddy', image: "docker.io/caddy:{{ caddy_version }}", ports: ["80:80", "443:443"], volumes: ["/home/{{ podman_user }}/containers/caddy/Caddyfile:/etc/caddy/Caddyfile:Z", "/home/{{ podman_user }}/containers/caddy/data:/data:Z"] }
 
     # -------------------------------------------------------------------------
     # 5. FIREWALL (AWALL) & FAIL2BAN
@@ -190,14 +190,13 @@
           bantime = 1h
 
     # -------------------------------------------------------------------------
-    # 6. PERSISTENCE & AUTO-UPDATES
+    # 6. PERSISTENCE (OpenRC workaround)
     # -------------------------------------------------------------------------
     - name: Enable Persistence (OpenRC Start script)
       copy:
         dest: /etc/local.d/podman.start
         content: |
           #!/bin/sh
-          # Wacht tot netwerk up is
           sleep 5
           su - {{ podman_user }} -c 'podman start --all'
         mode: '0755'
