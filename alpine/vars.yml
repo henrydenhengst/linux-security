@@ -1,0 +1,82 @@
+---
+# vars.yml
+# All configuration variables for Linux Cafe Haarlem web stack
+
+# ============================================
+# DUCKDNS CONFIGURATION (voor dynamisch IP)
+# ============================================
+duckdns_subdomain: "linuxcafehaarlem"
+duckdns_token: "YOUR_TOKEN_HERE"
+duckdns_update_ip: "ipv4"
+
+# ============================================
+# DOMAIN & NETWORK
+# ============================================
+# Eigen domein (professioneel)
+custom_domain: "lch.eu"
+# DuckDNS als backup/redirect (behouden voor dynamisch IP)
+duckdns_domain: "{{ duckdns_subdomain }}.duckdns.org"
+
+# Hoofddomein voor de services
+domain_name: "{{ custom_domain }}"
+timezone: "Europe/Amsterdam"
+
+# ============================================
+# USER CONFIGURATION
+# ============================================
+podman_user: "poduser"
+container_user_uid: 1000
+container_user_gid: 1000
+
+# ============================================
+# CONTAINER VERSIONS
+# ============================================
+caddy_version: "latest"
+nginx_version: "alpine"
+duckdns_version: "latest"
+php_version: "8.3"
+rocketchat_version: "6.4.8"
+mongodb_version: "7.0"
+
+# ============================================
+# ROCKET.CHAT CONFIGURATION
+# ============================================
+rocketchat_port: 3000
+rocketchat_mongodb_database: "rocketchat"
+rocketchat_mongodb_user: "rocketchat"
+rocketchat_mongodb_password: "JouwMongoDBSterkeWachtwoord123!"
+
+# Admin credentials
+rocketchat_admin_username: "lch"
+rocketchat_admin_email: "vcp5693@duck.com"
+rocketchat_admin_pass: "JouwSterkeWachtwoord123!"
+
+# ============================================
+# EMAIL CONFIGURATION
+# ============================================
+duck_email: "vcp5693@duck.com"
+
+# ============================================
+# NGINX CONFIGURATION
+# ============================================
+nginx_custom_config: false
+nginx_server_name: "_"
+
+# ============================================
+# FIREWALL RULES
+# ============================================
+open_ports:
+  - 80
+  - 443
+
+# ============================================
+# SECURITY SETTINGS
+# ============================================
+selinux_enabled: true
+
+# ============================================
+# HEALTH CHECK SETTINGS
+# ============================================
+health_check_interval: 30s
+health_check_timeout: 10s
+health_check_retries: 3
